@@ -63,6 +63,11 @@ for required in \
   "$SOURCE_ROOT/Tests/SelfTest/main.swift" \
   "$SOURCE_ROOT/scripts/build-dmg.sh" \
   "$SOURCE_ROOT/Resources/RC003-remote-photo.png" \
+  "$SOURCE_ROOT/device-profiles/xiaomi-rc003.json" \
+  "$SOURCE_ROOT/device-profiles/dji-mic-2.json" \
+  "$SOURCE_ROOT/specs/device-profile.schema.json" \
+  "$SOURCE_ROOT/docs/ARCHITECTURE.md" \
+  "$SOURCE_ROOT/docs/ADDING_A_DEVICE.md" \
   "$SOURCE_ROOT/LICENSE"; do
   rg -qx "$required" "$ZIP_LIST"
 done
@@ -77,6 +82,9 @@ if rg -a -q '/Users/[^/[:space:]]+|/tmp/remote-bridge|AA:BB:CC:DD:EE:FF' \
   "$SOURCE_EXTRACT/$SOURCE_ROOT/Sources" \
   "$SOURCE_EXTRACT/$SOURCE_ROOT/Tests" \
   "$SOURCE_EXTRACT/$SOURCE_ROOT/Resources" \
+  "$SOURCE_EXTRACT/$SOURCE_ROOT/device-profiles" \
+  "$SOURCE_EXTRACT/$SOURCE_ROOT/specs" \
+  "$SOURCE_EXTRACT/$SOURCE_ROOT/docs" \
   "$SOURCE_EXTRACT/$SOURCE_ROOT/Package.swift" \
   "$SOURCE_EXTRACT/$SOURCE_ROOT/README.md" \
   "$SOURCE_EXTRACT/$SOURCE_ROOT/LICENSE" \

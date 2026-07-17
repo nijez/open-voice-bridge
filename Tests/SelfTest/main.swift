@@ -25,6 +25,18 @@ check(
 let legacyLayout = ATVVCapabilities.parse(
     Data([0x0B, 0x01, 0x00, 0x00, 0x02, 0x00, 0x78, 0x00, 0x00])
 )
+
+let rc003Profile = VoiceBridgeDeviceProfiles.xiaomiRC003
+check(
+    rc003Profile.id == "xiaomi-rc003" &&
+        rc003Profile.hidIdentity == VoiceBridgeHIDIdentity(
+            vendorID: 0x2717,
+            productID: 0x32B8
+        ) &&
+        rc003Profile.transports == [.bluetoothLowEnergyGATT, .bluetoothHID] &&
+        rc003Profile.capabilities.contains(.voiceCapture),
+    "RC003 profile owns identity, transports, and capabilities"
+)
 check(
     legacyLayout?.selectedCodec == 0x02 && legacyLayout?.interaction == 0x03,
     "ATVV legacy codec layout"

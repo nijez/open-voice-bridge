@@ -1,0 +1,62 @@
+{
+  "$schema": "../specs/device-profile.schema.json",
+  "schemaVersion": 1,
+  "id": "dji-mic-2",
+  "displayName": "DJI Mic 2",
+  "vendor": "DJI",
+  "model": "DMT02 / DMR02",
+  "support": {
+    "status": "research",
+    "notes": "This profile records candidate integration paths only. Open Voice Bridge does not currently support DJI Mic 2."
+  },
+  "identity": {},
+  "transports": [
+    {
+      "kind": "usb-digital-audio",
+      "role": "voice-input",
+      "status": "research",
+      "notes": "DJI officially documents connecting the receiver to a computer by USB-C. Device enumeration and channel behavior must be verified on each desktop platform."
+    },
+    {
+      "kind": "bluetooth-br-edr-audio",
+      "role": "voice-input",
+      "status": "research",
+      "notes": "Do not assume generic desktop Bluetooth support. DJI's direct-transmitter Bluetooth compatibility list names selected DJI devices and smartphones, not desktop operating systems."
+    }
+  ],
+  "capabilities": [
+    "voice-capture",
+    "gain-control",
+    "channel-selection",
+    "device-status"
+  ],
+  "protocols": [
+    {
+      "id": "dji-device-specific-audio-and-control",
+      "status": "research",
+      "notes": "No undocumented Bluetooth or control protocol is claimed or implemented."
+    }
+  ],
+  "platforms": [
+    {
+      "platform": "macos",
+      "status": "research",
+      "notes": "Start with receiver-over-USB audio enumeration; Bluetooth is a separate research path."
+    },
+    {
+      "platform": "windows",
+      "status": "research",
+      "notes": "Start with receiver-over-USB audio enumeration; Bluetooth is a separate research path."
+    },
+    {
+      "platform": "linux",
+      "status": "research",
+      "notes": "Start with receiver-over-USB audio enumeration; Bluetooth is a separate research path."
+    }
+  ],
+  "sources": [
+    "https://www.dji.com/mic-2/specs",
+    "https://www.dji.com/mic-2/faq",
+    "https://www.dji.com/osmo-pocket-3/specs"
+  ]
+}

@@ -97,10 +97,15 @@ final class HIDRemoteMonitor {
         let suppressionReady = eventSuppressor.start()
         AppLogger.shared.write("HID FILTER ready=\(suppressionReady)")
 
+        guard let hidIdentity = VoiceBridgeDeviceProfiles.xiaomiRC003.hidIdentity else {
+            eventSuppressor.stop()
+            updateStatus("RC003 设备配置缺少 HID 标识")
+            return
+        }
         let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
         let matching = [
-            kIOHIDVendorIDKey as String: 0x2717,
-            kIOHIDProductIDKey as String: 0x32B8,
+            kIOHIDVendorIDKey as String: hidIdentity.vendorID,
+            kIOHIDProductIDKey as String: hidIdentity.productID,
         ] as CFDictionary
         IOHIDManagerSetDeviceMatching(manager, matching)
 

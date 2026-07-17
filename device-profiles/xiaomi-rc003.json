@@ -1,0 +1,70 @@
+{
+  "$schema": "../specs/device-profile.schema.json",
+  "schemaVersion": 1,
+  "id": "xiaomi-rc003",
+  "displayName": "Xiaomi Bluetooth Remote 2 Pro / RC003",
+  "vendor": "Xiaomi",
+  "model": "RC003",
+  "support": {
+    "status": "implemented",
+    "notes": "The macOS adapter has completed automated and real-device acceptance. Windows and Linux adapters are not implemented."
+  },
+  "identity": {
+    "bluetoothNames": [
+      "MI RC",
+      "Xiaomi Bluetooth Remote 2 Pro",
+      "小米蓝牙语音遥控器"
+    ],
+    "hid": {
+      "vendorId": 10007,
+      "productId": 12984
+    }
+  },
+  "transports": [
+    {
+      "kind": "ble-gatt",
+      "role": "voice-input",
+      "status": "implemented",
+      "notes": "ATVV control and 16 kHz compressed voice frames are handled by the current macOS adapter."
+    },
+    {
+      "kind": "bluetooth-hid",
+      "role": "button-input",
+      "status": "implemented",
+      "notes": "Button reports and the hardware microphone-key F5 edge are handled through IOHID on macOS."
+    }
+  ],
+  "capabilities": [
+    "voice-capture",
+    "press-to-talk",
+    "button-input",
+    "host-key-mapping"
+  ],
+  "protocols": [
+    {
+      "id": "android-tv-voice-over-ble",
+      "status": "implemented",
+      "notes": "The current adapter implements capability negotiation, microphone control, IMA/DVI ADPCM decode, and strict session gates."
+    }
+  ],
+  "platforms": [
+    {
+      "platform": "macos",
+      "status": "implemented",
+      "notes": "Universal build; current real-device acceptance was performed on Apple Silicon."
+    },
+    {
+      "platform": "windows",
+      "status": "planned",
+      "notes": "No Open Voice Bridge Windows adapter has been implemented."
+    },
+    {
+      "platform": "linux",
+      "status": "planned",
+      "notes": "No Open Voice Bridge Linux adapter has been implemented."
+    }
+  ],
+  "sources": [
+    "https://github.com/xxb26553663-star/remote-bridge-hub"
+  ]
+}

@@ -1,0 +1,196 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/nijez/open-voice-bridge/blob/main/specs/device-profile.schema.json",
+  "title": "Open Voice Bridge device profile",
+  "description": "Language-neutral metadata for one voice or control peripheral. A profile documents capability and routing facts; it does not by itself make a device supported.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "id",
+    "displayName",
+    "vendor",
+    "model",
+    "support",
+    "identity",
+    "transports",
+    "capabilities",
+    "platforms",
+    "sources"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "schemaVersion": {
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+([.-][a-z0-9]+)*$"
+    },
+    "displayName": {
+      "type": "string",
+      "minLength": 1
+    },
+    "vendor": {
+      "type": "string",
+      "minLength": 1
+    },
+    "model": {
+      "type": "string",
+      "minLength": 1
+    },
+    "support": {
+      "$ref": "#/$defs/support"
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "bluetoothNames": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "hid": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["vendorId", "productId"],
+          "properties": {
+            "vendorId": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65535
+            },
+            "productId": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65535
+            }
+          }
+        }
+      }
+    },
+    "transports": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "role", "status", "notes"],
+        "properties": {
+          "kind": {
+            "enum": [
+              "ble-gatt",
+              "bluetooth-hid",
+              "bluetooth-br-edr-audio",
+              "usb-digital-audio",
+              "analog-audio",
+              "system-audio-input"
+            ]
+          },
+          "role": {
+            "enum": ["control", "button-input", "voice-input", "voice-output"]
+          },
+          "status": {
+            "$ref": "#/$defs/status"
+          },
+          "notes": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "capabilities": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "voice-capture",
+          "press-to-talk",
+          "button-input",
+          "host-key-mapping",
+          "gain-control",
+          "channel-selection",
+          "device-status"
+        ]
+      }
+    },
+    "protocols": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "status", "notes"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "$ref": "#/$defs/status"
+          },
+          "notes": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "platforms": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["platform", "status", "notes"],
+        "properties": {
+          "platform": {
+            "enum": ["macos", "windows", "linux"]
+          },
+          "status": {
+            "$ref": "#/$defs/status"
+          },
+          "notes": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "sources": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "format": "uri"
+      }
+    }
+  },
+  "$defs": {
+    "status": {
+      "enum": ["implemented", "research", "planned", "unsupported"]
+    },
+    "support": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "notes"],
+      "properties": {
+        "status": {
+          "$ref": "#/$defs/status"
+        },
+        "notes": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

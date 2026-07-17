@@ -2,7 +2,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "XiaomiRemoteBridgeMac",
+    name: "OpenVoiceBridge",
     platforms: [.macOS(.v11)],
     products: [
         .executable(

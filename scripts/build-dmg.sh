@@ -26,7 +26,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$STAGING" "$SOURCE_DIR"
+mkdir -p "$STAGING" "$SOURCE_DIR" "$SOURCE_DIR/docs"
 
 "$ROOT/scripts/build-app.sh" --universal
 "$ROOT/scripts/verify-app.sh" --universal "$APP_DIR"
@@ -43,9 +43,14 @@ ditto --norsrc --noextattr --noqtn --noacl \
 ditto --norsrc --noextattr --noqtn --noacl \
   "$ROOT/THIRD_PARTY_NOTICES.md" "$STAGING/THIRD_PARTY_NOTICES.md"
 
-for item in Package.swift Sources Tests scripts Resources README.md LICENSE COPYRIGHT THIRD_PARTY_NOTICES.md; do
+for item in Package.swift Sources Tests scripts Resources device-profiles specs README.md LICENSE COPYRIGHT THIRD_PARTY_NOTICES.md; do
   ditto --norsrc --noextattr --noqtn --noacl \
     "$ROOT/$item" "$SOURCE_DIR/$item"
+done
+
+for item in ARCHITECTURE.md ADDING_A_DEVICE.md; do
+  ditto --norsrc --noextattr --noqtn --noacl \
+    "$ROOT/docs/$item" "$SOURCE_DIR/docs/$item"
 done
 
 ditto -c -k --keepParent --norsrc --noextattr --noqtn --noacl \

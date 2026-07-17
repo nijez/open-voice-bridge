@@ -1,17 +1,8 @@
 import Foundation
 
 enum RC003NameMatcher {
-    private static let approvedNames: Set<String> = [
-        "mi rc",
-        "xiaomi bluetooth remote 2 pro",
-        "小米蓝牙语音遥控器",
-    ]
-
     static func matches(_ rawName: String?) -> Bool {
-        guard let rawName else { return false }
-        let normalized = rawName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !normalized.isEmpty else { return false }
-        return approvedNames.contains(normalized)
+        VoiceBridgeDeviceProfiles.xiaomiRC003.matchesBluetoothName(rawName)
     }
 }
 

@@ -54,8 +54,6 @@ enum RemoteVoiceFunctionMappingPolicy {
 }
 
 final class RemoteVoiceFunctionMapper {
-    private static let vendorID = 0x2717
-    private static let productID = 0x32B8
     private static let mappingProperty = "UserKeyMapping" as CFString
 
     private struct OriginalVoiceMapping {
@@ -133,6 +131,9 @@ final class RemoteVoiceFunctionMapper {
     }
 
     private static func isTarget(_ service: IOHIDServiceClient) -> Bool {
+        guard let hidIdentity = VoiceBridgeDeviceProfiles.xiaomiRC003.hidIdentity else {
+            return false
+        }
         let vendor = IOHIDServiceClientCopyProperty(
             service,
             kIOHIDVendorIDKey as CFString
@@ -141,7 +142,8 @@ final class RemoteVoiceFunctionMapper {
             service,
             kIOHIDProductIDKey as CFString
         ) as? NSNumber
-        return vendor?.intValue == vendorID && product?.intValue == productID
+        return vendor?.intValue == hidIdentity.vendorID &&
+            product?.intValue == hidIdentity.productID
     }
 
     private static func registryID(_ service: IOHIDServiceClient) -> UInt64? {
