@@ -39,13 +39,13 @@ Profile 只记录可核对的事实与状态，不是驱动。只有代码、自
 - IOHID 原始按键读取，以及方向、确定、返回、主页、菜单、TV、音量等动作映射；
 - 保持原比例的 RC003 实物图与图形化映射设置。
 
-### 遥控器实物图与按键映射
+### 图形化按键映射界面
 
 <p align="center">
-  <img src="Resources/RC003-remote-photo.png" width="300" alt="小米蓝牙遥控器 2 Pro / RC003 实物按键图">
+  <img src="docs/images/rc003-mapping-settings.jpg" width="1000" alt="小米蓝牙遥控器 2 Pro / RC003 图形化按键映射设置界面">
 </p>
 
-<p align="center"><sub>这是应用“按键”页面实际使用的原比例映射底图；图中音量只有 + 和 −，遥控器没有独立静音实体键。</sub></p>
+<p align="center"><sub>完整“按键”设置界面：点击左侧实物按键，右侧会定位到对应动作。截图中的权限状态以当前 Mac 实际授权结果为准。</sub></p>
 
 打开菜单栏中的应用图标，选择“打开设置… → 按键”，即可使用图形化映射：
 
