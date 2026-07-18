@@ -152,7 +152,7 @@ jobs:
           & $iscc installer\OpenVoiceBridgeRC003Setup.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Package deterministic unsigned portable ZIP + SHA256SUMS
+      - name: Package deterministic unsigned release directory (ZIP + installer + SHA256SUMS)
         shell: pwsh
         run: |
           # "Deterministic" here means deterministic, non-random/non-timestamped
@@ -208,14 +208,91 @@ jobs:
             exit 1
           }
 
+          # XRBM-024 RETRY: stage the final ZIP, installer, and a manifest
+          # covering both into one CLEAN release directory, then upload
+          # ONLY that single directory below - never a multi-pattern path
+          # list. Red evidence this fixes: a real Windows run
+          # (29643494504) reported every step green, including this one,
+          # but the upload-artifact log itself said "With the provided
+          # path, there will be 2 files uploaded" and the downloaded
+          # artifact was missing SHA256SUMS.txt entirely - because
+          # `if-no-files-found: error` only proves at least one of several
+          # independent glob patterns matched something, never that every
+          # declared input matched. A single pre-verified directory cannot
+          # silently drop one of its members the way an unverified
+          # multi-pattern path list can.
+          $releaseDir = "dist/release"
+          if (Test-Path $releaseDir) { Remove-Item $releaseDir -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
+
+          $zipName = Split-Path $zipPath -Leaf
+          $installerName = $installerExe.Name
+          $releaseZipPath = Join-Path $releaseDir $zipName
+          $releaseInstallerPath = Join-Path $releaseDir $installerName
+          $releaseManifestPath = Join-Path $releaseDir "SHA256SUMS.txt"
+
+          Copy-Item -Path $zipPath -Destination $releaseZipPath -Force
+          Copy-Item -Path $installerExe.FullName -Destination $releaseInstallerPath -Force
+
+          # The manifest is generated from, and verified against, the
+          # STAGED release-directory copies below - not the original
+          # dist/portable|installer files - so a copy failure or a
+          # mismatch between the two locations can never pass unnoticed.
           $hashed = @(
-            (Get-FileHash -Algorithm SHA256 -LiteralPath $zipPath),
-            (Get-FileHash -Algorithm SHA256 -LiteralPath $installerExe.FullName)
+            (Get-FileHash -Algorithm SHA256 -LiteralPath $releaseZipPath),
+            (Get-FileHash -Algorithm SHA256 -LiteralPath $releaseInstallerPath)
           )
           $lines = $hashed |
             Sort-Object { Split-Path $_.Path -Leaf } |
             ForEach-Object { "{0}  {1}" -f $_.Hash.ToLowerInvariant(), (Split-Path $_.Path -Leaf) }
-          Set-Content -Path dist/SHA256SUMS.txt -Value $lines -Encoding ascii
+          Set-Content -Path $releaseManifestPath -Value $lines -Encoding ascii
+
+          # Hard preflight, BEFORE upload: exactly three files, exactly the
+          # expected deterministic filenames, exactly two well-formed
+          # manifest lines, every listed file present, and every hash
+          # independently recomputed and compared against the manifest.
+          # Any mismatch fails this step - and therefore the job - instead
+          # of silently uploading an incomplete or inconsistent set.
+          $releaseFiles = @(Get-ChildItem -Path $releaseDir -File)
+          if ($releaseFiles.Count -ne 3) {
+            Write-Error "release directory must contain exactly 3 files, found $($releaseFiles.Count): $($releaseFiles.Name -join ', ')"
+            exit 1
+          }
+
+          $expectedNames = @($zipName, $installerName, "SHA256SUMS.txt") | Sort-Object
+          $actualNames = @($releaseFiles.Name) | Sort-Object
+          $nameDiff = Compare-Object -ReferenceObject $expectedNames -DifferenceObject $actualNames
+          if ($nameDiff) {
+            Write-Error "release directory file set does not match the expected deterministic names. expected: $($expectedNames -join ', '); actual: $($actualNames -join ', ')"
+            exit 1
+          }
+
+          $manifestLines = @(Get-Content -Path $releaseManifestPath)
+          if ($manifestLines.Count -ne 2) {
+            Write-Error "SHA256SUMS.txt must contain exactly 2 lines, found $($manifestLines.Count)"
+            exit 1
+          }
+
+          foreach ($line in $manifestLines) {
+            if ($line -notmatch '^(?<hash>[0-9a-f]{64})  (?<name>\S.*)$') {
+              Write-Error "malformed SHA256SUMS.txt line: $line"
+              exit 1
+            }
+            $expectedHash = $Matches['hash']
+            $fileName = $Matches['name']
+            $filePath = Join-Path $releaseDir $fileName
+            if (-not (Test-Path $filePath)) {
+              Write-Error "SHA256SUMS.txt references a file that does not exist in the release directory: $fileName"
+              exit 1
+            }
+            $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $filePath).Hash.ToLowerInvariant()
+            if ($actualHash -ne $expectedHash) {
+              Write-Error "SHA256 mismatch for ${fileName}: manifest=$expectedHash actual=$actualHash"
+              exit 1
+            }
+          }
+
+          Write-Host "release directory preflight passed: 3 files, 2 well-formed manifest lines, all hashes verified"
 
       # XRBM-022 controller pre-review correction: this is the ONLY
       # upload-artifact step in this job, and it runs LAST, after every
@@ -226,12 +303,14 @@ jobs:
       # gate ran - so a job whose Inno step then failed could still leave a
       # published artifact behind. No artifact may be published before
       # every required gate has passed.
+      #
+      # XRBM-024 RETRY: path is now the single, already hard-verified
+      # dist/release directory - not a multi-pattern list - so the
+      # uploaded artifact is exactly and only that directory's flat
+      # contents (see the packaging step's preflight above).
       - name: Upload deterministic distribution artifacts (unsigned, never installed/signed/published)
         uses: actions/upload-artifact@v7
         with:
           name: OpenVoiceBridgeRC003-distribution-unsigned
-          path: |
-            apps/windows/rc003/dist/portable/*.zip
-            apps/windows/rc003/dist/installer/*.exe
-            apps/windows/rc003/dist/SHA256SUMS.txt
+          path: apps/windows/rc003/dist/release
           if-no-files-found: error

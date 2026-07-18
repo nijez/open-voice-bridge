@@ -551,6 +551,120 @@ class WindowsCiWorkflowTests(unittest.TestCase):
         self.assertIn('$stagingName = "OpenVoiceBridgeRC003-$version"', self.text)
         self.assertIn('$stagingDir = "dist/portable/$stagingName"', self.text)
 
+    def _package_step_text(self):
+        start = self.text.index(
+            "- name: Package deterministic unsigned release directory"
+        )
+        end = self.text.index(
+            "- name: Upload deterministic distribution artifacts", start
+        )
+        return self.text[start:end]
+
+    def _upload_step_text(self):
+        return self.text[
+            self.text.index("- name: Upload deterministic distribution artifacts") :
+        ]
+
+    def test_release_directory_is_staged_from_the_final_zip_and_installer(self):
+        # XRBM-024 RETRY: the release directory is a CLEAN copy target, not
+        # the original dist/portable|installer locations - so a stale file
+        # left over from a previous run can never leak into an upload.
+        step = self._package_step_text()
+        self.assertIn('$releaseDir = "dist/release"', step)
+        self.assertIn(
+            "if (Test-Path $releaseDir) { Remove-Item $releaseDir -Recurse -Force }",
+            step,
+        )
+        self.assertIn(
+            "Copy-Item -Path $zipPath -Destination $releaseZipPath -Force", step
+        )
+        self.assertIn(
+            "Copy-Item -Path $installerExe.FullName -Destination $releaseInstallerPath -Force",
+            step,
+        )
+
+    def test_release_directory_is_cleaned_before_the_copies_are_staged(self):
+        step = self._package_step_text()
+        clean_index = step.index(
+            "if (Test-Path $releaseDir) { Remove-Item $releaseDir -Recurse -Force }"
+        )
+        zip_copy_index = step.index(
+            "Copy-Item -Path $zipPath -Destination $releaseZipPath -Force"
+        )
+        installer_copy_index = step.index(
+            "Copy-Item -Path $installerExe.FullName -Destination $releaseInstallerPath -Force"
+        )
+        self.assertLess(clean_index, zip_copy_index)
+        self.assertLess(clean_index, installer_copy_index)
+
+    def test_release_manifest_is_generated_from_the_staged_copies_not_the_originals(self):
+        # The manifest must hash the files actually sitting in dist/release
+        # - not the originals under dist/portable|installer - so a copy
+        # failure (or any divergence between the two locations) is
+        # reflected in the manifest the preflight below verifies.
+        step = self._package_step_text()
+        self.assertIn(
+            "Get-FileHash -Algorithm SHA256 -LiteralPath $releaseZipPath", step
+        )
+        self.assertIn(
+            "Get-FileHash -Algorithm SHA256 -LiteralPath $releaseInstallerPath", step
+        )
+        self.assertIn(
+            "Set-Content -Path $releaseManifestPath -Value $lines -Encoding ascii",
+            step,
+        )
+        self.assertNotIn("Set-Content -Path dist/SHA256SUMS.txt", step)
+
+    def test_preflight_hard_checks_exactly_three_files_with_the_expected_names(self):
+        step = self._package_step_text()
+        self.assertIn("$releaseFiles.Count -ne 3", step)
+        self.assertIn(
+            '$expectedNames = @($zipName, $installerName, "SHA256SUMS.txt") | Sort-Object',
+            step,
+        )
+        self.assertIn(
+            "Compare-Object -ReferenceObject $expectedNames -DifferenceObject $actualNames",
+            step,
+        )
+
+    def test_preflight_hard_checks_exactly_two_well_formed_manifest_lines(self):
+        step = self._package_step_text()
+        self.assertIn("$manifestLines.Count -ne 2", step)
+        self.assertIn(
+            r"'^(?<hash>[0-9a-f]{64})  (?<name>\S.*)$'", step
+        )
+
+    def test_preflight_verifies_every_manifest_entry_exists_and_hash_matches(self):
+        step = self._package_step_text()
+        self.assertIn("if (-not (Test-Path $filePath))", step)
+        self.assertIn(
+            "$actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $filePath).Hash.ToLowerInvariant()",
+            step,
+        )
+        self.assertIn("$actualHash -ne $expectedHash", step)
+
+    def test_preflight_runs_before_the_upload_step(self):
+        preflight_index = self.text.index(
+            "$releaseFiles = @(Get-ChildItem -Path $releaseDir -File)"
+        )
+        upload_index = self.text.index("uses: actions/upload-artifact@v7")
+        self.assertLess(preflight_index, upload_index)
+
+    def test_upload_path_is_the_single_release_directory_not_a_multi_pattern_list(self):
+        # XRBM-024 RETRY red evidence: a real Windows run (29643494504)
+        # reported every step green, but the upload-artifact log itself
+        # said "With the provided path, there will be 2 files uploaded" and
+        # the downloaded artifact was missing SHA256SUMS.txt entirely -
+        # because `if-no-files-found: error` only proves at least one of
+        # several independent glob patterns matched something, never that
+        # every declared pattern did. The fix uploads a single,
+        # already-hard-verified directory instead of a multi-pattern list.
+        upload_step = self._upload_step_text()
+        self.assertIn("path: apps/windows/rc003/dist/release", upload_step)
+        self.assertNotIn("dist/portable/*.zip", upload_step)
+        self.assertNotIn("dist/installer/*.exe", upload_step)
+        self.assertNotIn("dist/SHA256SUMS.txt", upload_step)
+
     def test_does_not_falsely_claim_zero_sendinput_or_raw_input_usage(self):
         # XRBM-022: the prior comment falsely claimed the job "does not
         # inject any SendInput/Raw Input event" - the Windows-only tests
