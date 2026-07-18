@@ -52,6 +52,15 @@ hiddenimports = [
     "winrt.windows.devices.bluetooth.genericattributeprofile",
     "winrt.windows.devices.enumeration",
     "winrt.windows.storage.streams",
+    # XRBM-024: find_all_async_aqs_filter()'s returned IAsyncOperation and
+    # DeviceInformationCollection's iterator both come from these two
+    # projections at runtime (see requirements.txt's XRBM-024 comment) -
+    # PyInstaller's static analysis cannot see that dependency because
+    # ble_transport_winrt.py never imports these modules by name, so they
+    # must be listed explicitly or the frozen build passes analysis and
+    # then crashes on first real BLE discovery.
+    "winrt.windows.foundation",
+    "winrt.windows.foundation.collections",
 ]
 
 a = Analysis(

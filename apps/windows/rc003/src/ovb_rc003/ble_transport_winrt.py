@@ -6,6 +6,17 @@ project's hard boundary against operating real devices). Importing this
 module never fails without the optional ``winrt-Windows.*`` packages
 installed; only calling its async functions does, with a clear error.
 
+Dependency closure (XRBM-024): ``discover_candidates()``'s
+``find_all_async_aqs_filter()`` call returns a
+``Windows.Foundation.IAsyncOperation``, and iterating the resulting
+``DeviceInformationCollection`` uses a ``Windows.Foundation.Collections``
+``IIterator`` - both projections are exact ``3.2.1`` pins in
+requirements.txt and PyInstaller hidden imports even though this module
+never imports either module by name (see ``_import_winrt()``, which
+imports both explicitly purely to turn a missing pin into this module's own
+``WinRTUnavailableError`` instead of a raw ``ModuleNotFoundError`` from
+inside an awaited coroutine).
+
 WinRT call surface (fixed after XRBM-014 review RETRY P1 #1, and again after
 review round 2 P1 #2 - see XRBM-014's independent review): every
 call below is written to match the locked ``winrt-Windows.*==3.2.1``
@@ -126,6 +137,18 @@ def _import_winrt() -> WinRTModules:
         )
         from winrt.windows.devices.enumeration import DeviceInformation
         from winrt.windows.storage.streams import DataWriter
+
+        # XRBM-024: not referenced by name anywhere below - discovered only
+        # when a real WinRT call is awaited (DeviceInformation.find_all_
+        # async_aqs_filter() returns a Windows.Foundation.IAsyncOperation;
+        # iterating its result uses a Windows.Foundation.Collections
+        # IIterator) - so importing them here, up front, turns a missing
+        # projection into this function's clean WinRTUnavailableError
+        # instead of a raw ModuleNotFoundError surfacing deep inside an
+        # awaited coroutine (see requirements.txt's XRBM-024 comment for the
+        # exact red evidence this closes).
+        import winrt.windows.foundation  # noqa: F401
+        import winrt.windows.foundation.collections  # noqa: F401
     except ImportError as exc:  # pragma: no cover - exercised only on Windows
         raise WinRTUnavailableError(
             "winrt Bluetooth packages are not installed; install "

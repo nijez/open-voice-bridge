@@ -136,6 +136,66 @@ class RawInputWindowsTests(unittest.TestCase):
             listener.stop()
 
 
+# XRBM-024: every WinRT projection module ble_transport_winrt.py's real call
+# path depends on at runtime - the four it imports by name inside
+# _import_winrt(), plus winrt.windows.foundation/winrt.windows.foundation.
+# collections, which it never imports by name but which
+# find_all_async_aqs_filter()'s returned IAsyncOperation and the resulting
+# DeviceInformationCollection's iterator both require (see
+# ble_transport_winrt.py's module docstring and requirements.txt's XRBM-024
+# comment for the exact red evidence this closes).
+_REQUIRED_WINRT_PROJECTIONS = (
+    "winrt.windows.devices.bluetooth",
+    "winrt.windows.devices.bluetooth.genericattributeprofile",
+    "winrt.windows.devices.enumeration",
+    "winrt.windows.storage.streams",
+    "winrt.windows.foundation",
+    "winrt.windows.foundation.collections",
+)
+
+
+@unittest.skipUnless(
+    _ON_WINDOWS,
+    "Windows-only: this IS the hard-fail projection-import gate, not a "
+    "skip-if-unavailable check (see the class docstring)",
+)
+class WinRTProjectionImportClosureTests(unittest.TestCase):
+    """XRBM-024: proves every WinRT projection ble_transport_winrt.py's real
+    call path needs actually imports on a genuine Windows runner - a hard
+    FAIL here, never a skip, if any one of them is missing.
+
+    Deliberately NOT gated on ``_has_module(...)`` the way
+    BleTransportWinrtTests below is: that class's skip condition exists so
+    the *behavioral* BLE test itself does not run at all off-Windows or when
+    winrt is not installed there. This class's whole purpose is the
+    opposite - to make "on Windows but a required projection failed to
+    import" an unambiguous test FAILURE, since converting that into a
+    silent skip is exactly how XRBM-024's red evidence (a
+    source-test-green, first-real-use ``ModuleNotFoundError`` on
+    ``winrt.windows.foundation``) slipped through the frozen-build gate
+    undetected.
+    """
+
+    def test_every_projection_ble_transport_winrt_needs_actually_imports(self):
+        import importlib
+
+        missing = []
+        for module_name in _REQUIRED_WINRT_PROJECTIONS:
+            try:
+                importlib.import_module(module_name)
+            except ImportError as exc:
+                missing.append(f"{module_name}: {exc!r}")
+
+        self.assertEqual(
+            missing,
+            [],
+            "required WinRT projection(s) failed to import on this Windows "
+            "runner; install every exact pin in requirements.txt - a "
+            "missing required projection must fail this test, not silently "
+            "skip it: " + "; ".join(missing),
+        )
+
+
 @unittest.skipUnless(
     _ON_WINDOWS and _has_module("winrt.windows.devices.bluetooth"),
     "Windows-only: requires the winrt Bluetooth packages",

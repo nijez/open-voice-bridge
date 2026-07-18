@@ -10,6 +10,7 @@ from pathlib import Path
 _RC003_ROOT = Path(__file__).resolve().parents[1]
 _REPO_ROOT = _RC003_ROOT.parents[2]
 _SPEC_PATH = _RC003_ROOT / "build" / "OpenVoiceBridgeRC003.spec"
+_REQUIREMENTS_PATH = _RC003_ROOT / "requirements.txt"
 _ISS_PATH = _RC003_ROOT / "installer" / "OpenVoiceBridgeRC003Setup.iss"
 _CI_PATH = _REPO_ROOT / ".github" / "workflows" / "windows-rc003-ci.yml"
 _PACKAGE_MAIN_PATH = _RC003_ROOT / "src" / "ovb_rc003" / "__main__.py"
@@ -84,6 +85,101 @@ def _iss_section(text: str, name: str) -> str:
     )
     assert match is not None, f"[{name}] section header not found"
     return match.group(1)
+
+
+_WINRT_PIN_RE = re.compile(r"^winrt-Windows\.([A-Za-z0-9.]+)==3\.2\.1$")
+
+
+def _winrt_requirement_modules(text: str) -> set:
+    """Maps every exact ``winrt-Windows.<Namespace>==3.2.1`` pin in
+    requirements.txt to the ``winrt.windows.<namespace>`` module name it
+    installs (e.g. ``winrt-Windows.Foundation.Collections==3.2.1`` ->
+    ``winrt.windows.foundation.collections``). Deliberately excludes
+    ``winrt-runtime`` (not a ``winrt.windows.*`` namespace import).
+    """
+
+    modules = set()
+    for line in text.splitlines():
+        match = _WINRT_PIN_RE.match(line.strip())
+        if match:
+            modules.add("winrt.windows." + match.group(1).lower())
+    return modules
+
+
+def _spec_hidden_import_winrt_modules(text: str) -> set:
+    tree = ast.parse(text, filename=str(_SPEC_PATH))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "hiddenimports"
+            for target in node.targets
+        ):
+            values = ast.literal_eval(node.value)
+            return {value for value in values if value.startswith("winrt.")}
+    raise AssertionError("hiddenimports assignment not found in spec")
+
+
+class WinRTDependencyClosureContractTests(unittest.TestCase):
+    """XRBM-024: deterministic, cross-platform proof that every exact
+    ``winrt-Windows.*==3.2.1`` pin in requirements.txt has a matching
+    PyInstaller hidden import, and vice versa - so the source-test/
+    frozen-build dependency closure this task fixed (Foundation and
+    Foundation.Collections missing from both) cannot silently drift apart
+    again for any winrt-Windows.* projection, present or future.
+    """
+
+    def setUp(self):
+        self.requirements_text = _REQUIREMENTS_PATH.read_text(encoding="utf-8")
+        self.spec_text = _SPEC_PATH.read_text(encoding="utf-8")
+
+    def test_foundation_and_foundation_collections_are_pinned_at_exact_3_2_1(self):
+        self.assertIn("winrt-Windows.Foundation==3.2.1", self.requirements_text)
+        self.assertIn(
+            "winrt-Windows.Foundation.Collections==3.2.1", self.requirements_text
+        )
+
+    def test_requirements_never_pulls_the_broad_all_extra(self):
+        # XRBM-024 in-scope item 1: exact base-package pins only, never the
+        # "[all]" extra, which would pull in every unrelated namespace those
+        # packages' own "all" extras reference (ApplicationModel.Background,
+        # Security.Credentials, UI, UI.Popups, Storage, System, Networking,
+        # Radios, Rfcomm, ...). Checked against effective (non-comment)
+        # content, since this file's own comment legitimately explains the
+        # "not [all]" rule in prose.
+        self.assertNotIn("[all]", _strip_hash_comments(self.requirements_text))
+
+    def test_spec_declares_hidden_imports_for_foundation_and_foundation_collections(self):
+        modules = _spec_hidden_import_winrt_modules(self.spec_text)
+        self.assertIn("winrt.windows.foundation", modules)
+        self.assertIn("winrt.windows.foundation.collections", modules)
+
+    def test_every_pinned_winrt_windows_package_has_a_matching_hidden_import(self):
+        pinned_modules = _winrt_requirement_modules(self.requirements_text)
+        hidden_import_modules = _spec_hidden_import_winrt_modules(self.spec_text)
+        self.assertTrue(
+            pinned_modules, "no winrt-Windows.*==3.2.1 pins found in requirements.txt"
+        )
+        missing_hidden_imports = pinned_modules - hidden_import_modules
+        self.assertEqual(
+            missing_hidden_imports,
+            set(),
+            "requirements.txt pins a winrt-Windows.* projection with no "
+            "matching PyInstaller hidden import - the frozen build would "
+            "pass source tests and then crash at runtime: "
+            f"{sorted(missing_hidden_imports)}",
+        )
+
+    def test_every_winrt_hidden_import_has_a_matching_requirements_pin(self):
+        pinned_modules = _winrt_requirement_modules(self.requirements_text)
+        hidden_import_modules = _spec_hidden_import_winrt_modules(self.spec_text)
+        missing_pins = hidden_import_modules - pinned_modules
+        self.assertEqual(
+            missing_pins,
+            set(),
+            "PyInstaller hidden-imports a winrt.windows.* module with no "
+            "matching requirements.txt pin - the frozen build's runtime "
+            "closure is undocumented/unpinned: "
+            f"{sorted(missing_pins)}",
+        )
 
 
 class PyInstallerSpecTests(unittest.TestCase):
