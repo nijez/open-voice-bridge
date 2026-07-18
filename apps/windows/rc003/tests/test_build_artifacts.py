@@ -353,6 +353,26 @@ class WindowsCiWorkflowTests(unittest.TestCase):
     def test_test_suite_is_gated_by_resource_warning(self):
         self.assertIn("-W error::ResourceWarning -m unittest discover", self.text)
 
+    def test_test_suite_step_is_verbose_unbuffered_and_bounded(self):
+        # Regression for XRBM-023: both canceled real-Windows-CI runs
+        # produced only a single buffered "E.......F<235 dots>" line with no
+        # test names at all, and the job had no step-level bound - a future
+        # hang would again consume the runner up to the 360-minute job
+        # default with no way to identify which test hung. The test step
+        # must run unittest verbosely (-v) with unbuffered output (-u /
+        # PYTHONUNBUFFERED) so a hung test's name is actually flushed and
+        # visible before a step-level timeout-minutes cancels the step.
+        run_step_start = self.text.index("- name: Run test suite")
+        next_step_start = self.text.index("- name:", run_step_start + 1)
+        run_step_text = self.text[run_step_start:next_step_start]
+
+        self.assertIn("timeout-minutes:", run_step_text)
+        self.assertIn("PYTHONUNBUFFERED", run_step_text)
+        self.assertIn("python -u -W error::ResourceWarning -m unittest discover", run_step_text)
+        self.assertIn(
+            '-m unittest discover -s tests -t . -p "test_*.py" -v', run_step_text
+        )
+
     def test_packages_deterministic_zip_and_sha256sums(self):
         self.assertIn("Compress-Archive", self.text)
         self.assertIn("Get-FileHash", self.text)

@@ -42,6 +42,16 @@ class _ArgvRestoringTestCase(unittest.TestCase):
         self._original_guard_cls = single_instance.BridgeInstanceGuard
         self._original_app_main = app.main
         self._original_notice = single_instance.show_bridge_startup_blocked_notice
+        # XRBM-023: default every test in this suite to a safe no-op stub for
+        # the visible-notice callable. show_bridge_startup_blocked_notice's
+        # real implementation opens a real, SYSTEMMODAL Win32 MessageBoxW -
+        # a test that deliberately triggers a blocked startup but forgets to
+        # override this explicitly would otherwise open that real dialog and
+        # hang the whole headless CI runner waiting for user input (the
+        # test_duplicate_launch_never_calls_app_main defect this task fixes).
+        # Tests that need to assert on the exact notice text/call count still
+        # override this in their own body, same as before.
+        single_instance.show_bridge_startup_blocked_notice = lambda message: None
 
     def tearDown(self):
         sys.argv = self._original_argv
@@ -75,6 +85,41 @@ class BridgeModeRoutingTests(_ArgvRestoringTestCase):
         self.assertEqual(app_main_calls, [])
         self.assertEqual(ctx.exception.code, single_instance.DUPLICATE_INSTANCE_EXIT_CODE)
         self.assertNotEqual(single_instance.DUPLICATE_INSTANCE_EXIT_CODE, 0)
+
+    def test_duplicate_launch_without_an_explicit_notice_override_reaches_the_real_notice_function(self):
+        """Regression for XRBM-023 test 245: reproduces exactly why the
+        original test_duplicate_launch_never_calls_app_main hung the real
+        Windows CI runner - it left the REAL show_bridge_startup_blocked_
+        notice wired up, which by default calls single_instance's real
+        SYSTEMMODAL Win32 MessageBoxW, and a headless runner then blocks
+        waiting for user input on that dialog forever.
+
+        This drives that same REAL notice function (self._original_notice,
+        undoing setUp's safety-net no-op stub) through main()'s exact
+        duplicate-launch path, proving it does get called - but with its
+        own ``_message_box`` collaborator swapped for a safe recorder, so
+        this regression test itself never risks opening a real dialog on
+        any OS/CI runner, including a real Windows one.
+        """
+        message_box_calls = []
+
+        def _spy_notice(message):
+            self._original_notice(
+                message,
+                _message_box=lambda title, msg: message_box_calls.append((title, msg)) or 1,
+            )
+
+        single_instance.show_bridge_startup_blocked_notice = _spy_notice
+        app.main = lambda: self.fail("app.main() must never run on a duplicate launch")
+        single_instance.BridgeInstanceGuard = _make_guard_class(
+            raise_on_enter=single_instance.DuplicateInstanceError("already running")
+        )
+        sys.argv = ["ovb_rc003"]
+
+        with self.assertRaises(SystemExit):
+            main_module.main()
+
+        self.assertEqual(len(message_box_calls), 1)
 
     def test_duplicate_launch_shows_the_visible_notice_exactly_once(self):
         app.main = lambda: self.fail("app.main() must never run on a duplicate launch")

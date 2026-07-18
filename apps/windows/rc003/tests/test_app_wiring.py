@@ -19,13 +19,15 @@ in for it.
 """
 
 import asyncio
+import logging
+import sys
 import tempfile
 import threading
 import unittest
 from pathlib import Path
 
 from ovb_rc003 import app as app_module
-from ovb_rc003 import config, key_mapping, win32_input
+from ovb_rc003 import config, key_mapping, logging_setup, win32_input
 from ovb_rc003.atvv_session import AudioStopped
 
 
@@ -131,6 +133,22 @@ class _AppWiringTestCase(unittest.TestCase):
         self.app._ble_session = _FakeBleSession()
 
     def tearDown(self):
+        # XRBM-023: logging_setup.get_logger() configures its FileHandler
+        # exactly once per process (module-global ``_configured``) and never
+        # closes it - correct for a real long-running app, but in this suite
+        # it leaves an open handle inside THIS test's temp directory. Windows
+        # (unlike POSIX, where you can unlink a file while a handle is still
+        # open on it) refuses to delete a directory containing an open file
+        # handle, so ``self._tmp.cleanup()`` below would raise on Windows
+        # once any prior test in this class had already configured the
+        # logger. Close/remove the handler and reset the one-time-config
+        # flag first so every test starts and ends with no logging state
+        # leaked into the next one.
+        logger = logging.getLogger(logging_setup.LOGGER_NAME)
+        for handler in list(logger.handlers):
+            handler.close()
+            logger.removeHandler(handler)
+        logging_setup._configured = False
         self._tmp.cleanup()
 
 
@@ -139,6 +157,15 @@ class HostHotkeyFailureSuppressesMicOpenTests(_AppWiringTestCase):
     host hotkey actually, fully delivered.
     """
 
+    @unittest.skipIf(
+        sys.platform == "win32",
+        "only exercises the off-Windows win32_input._require_windows() gate "
+        "(no injected sender); on a real Windows runner the real SendInput "
+        "call fully delivers instead, so this would assert the opposite of "
+        "what actually happens there (XRBM-023) - "
+        "test_hotkey_partial_delivery_suppresses_mic_open below covers the "
+        "same suppression contract cross-platform via dependency injection",
+    )
     def test_hotkey_unavailable_off_windows_suppresses_mic_open(self):
         self.app._handle_mic_button_pressed()
 
@@ -184,6 +211,29 @@ class HostHotkeyFailureSuppressesMicOpenTests(_AppWiringTestCase):
 
         self.assertEqual(hotkey_calls, [])
         self.assertEqual(self.app._ble_session.mic_open_calls, 0)
+
+    def test_windows_actually_delivers_the_hotkey_unlike_the_off_windows_case(self):
+        """Regression for XRBM-023 outcome 9: on a real Windows runner,
+        win32_input._require_windows() does NOT raise, so the un-mocked
+        send_key_combo_tap() call inside _handle_mic_button_pressed()
+        reaches the real SendInput batch sender - simulated here as a full
+        delivery - and MIC_OPEN IS sent. This is exactly why the skipped
+        test_hotkey_unavailable_off_windows_suppresses_mic_open above would
+        have failed (not errored) on the real Windows CI runner: it asserts
+        the opposite of what actually happens there.
+        """
+        original_platform = sys.platform
+        original_sender = win32_input._real_send_input_batch
+        sys.platform = "win32"
+        win32_input._real_send_input_batch = lambda events: len(events)
+        try:
+            self.app._handle_mic_button_pressed()
+        finally:
+            sys.platform = original_platform
+            win32_input._real_send_input_batch = original_sender
+
+        self.assertEqual(self.app._ble_session.mic_open_calls, 1)
+        self.assertTrue(self.app._voice.active)
 
 
 class PlaybackWriteFailureTests(_AppWiringTestCase):
@@ -561,6 +611,63 @@ class PlaybackCleanupOwnershipTests(_AppWiringTestCase):
         self.assertEqual(sink.close_calls, 1)
         # Still fails closed via reconnect either way:
         self.assertEqual(reconnect_calls, [1])
+
+
+class LoggingHandlerCleanupRegressionTests(unittest.TestCase):
+    """Regression for XRBM-023 outcome 1: proves _AppWiringTestCase's
+    tearDown fix (close/remove the FileHandler, reset ``_configured``)
+    actually decouples one app build's logging handler from the next -
+    the exact defect that made a real Windows CI runner's
+    ``tempfile.TemporaryDirectory().cleanup()`` raise a PermissionError
+    on the very first test the suite's discovery order ever runs
+    (``CleanupOwnershipTests.test_ble_close_failure_retains_ble_owner_but_
+    still_completes_hid_and_playback``): ``logging_setup.get_logger()``
+    configures its FileHandler exactly once per process and never closes
+    it, so without this cleanup the handle stays open inside that first
+    test's temp directory for the rest of the run - and Windows, unlike
+    POSIX, refuses to delete a directory containing a still-open handle.
+    """
+
+    def test_a_second_app_build_gets_its_own_fresh_handler_after_cleanup(self):
+        tmp1 = tempfile.TemporaryDirectory()
+        try:
+            _build_app(Path(tmp1.name))
+            logger = logging.getLogger(logging_setup.LOGGER_NAME)
+            self.assertEqual(len(logger.handlers), 1)
+            handler1 = logger.handlers[0]
+            self.assertEqual(
+                Path(handler1.baseFilename).parent, Path(tmp1.name) / "logs"
+            )
+            self.assertIsNotNone(handler1.stream)
+
+            # Exactly what _AppWiringTestCase.tearDown now does.
+            handler1.close()
+            logger.removeHandler(handler1)
+            logging_setup._configured = False
+
+            self.assertIsNone(handler1.stream)
+            self.assertEqual(logger.handlers, [])
+        finally:
+            # Must not raise: on Windows this would be the PermissionError
+            # from outcome 1 if the handle above were still open.
+            tmp1.cleanup()
+
+        tmp2 = tempfile.TemporaryDirectory()
+        try:
+            _build_app(Path(tmp2.name))
+            logger = logging.getLogger(logging_setup.LOGGER_NAME)
+            self.assertEqual(len(logger.handlers), 1)
+            handler2 = logger.handlers[0]
+            self.assertIsNot(handler2, handler1)
+            self.assertEqual(
+                Path(handler2.baseFilename).parent, Path(tmp2.name) / "logs"
+            )
+
+            handler2.close()
+            logger.removeHandler(handler2)
+            logging_setup._configured = False
+        finally:
+            tmp2.cleanup()
 
 
 async def _record_connect(connect_calls):

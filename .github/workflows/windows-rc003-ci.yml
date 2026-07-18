@@ -96,12 +96,24 @@ jobs:
           python -m compileall -q src
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      # XRBM-023: verbose (-v) so each test name streams out as it starts/
+      # finishes, PYTHONUNBUFFERED so that output actually streams instead
+      # of sitting in Python's default full-buffering-when-not-a-tty mode
+      # (which is exactly why the XRBM-023 hang's canceled-run logs showed
+      # zero test names - only a single buffered E.......F<dots> line, with
+      # nothing for the hung test ever flushed), and a bounded step-level
+      # timeout so a future platform-specific hang cancels just this step
+      # instead of silently consuming the runner up to the 360-minute job
+      # default - the last test name printed before a timeout cancellation
+      # is then the hung test.
       - name: Run test suite
         shell: pwsh
+        timeout-minutes: 10
         env:
           PYTHONPATH: src
+          PYTHONUNBUFFERED: "1"
         run: |
-          python -W error::ResourceWarning -m unittest discover -s tests -t . -p "test_*.py"
+          python -u -W error::ResourceWarning -m unittest discover -s tests -t . -p "test_*.py" -v
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: PyInstaller build (unsigned candidate)
