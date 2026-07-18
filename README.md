@@ -4,7 +4,7 @@ Open Voice Bridge 是一个面向无线麦克风、语音遥控器和其他语�
 
 它把问题拆成六层：设备身份与能力、传输、设备协议、音频图、动作映射和平台后端。一个设备可以组合 BLE GATT、Bluetooth HID、USB 数字音频或系统音频输入；macOS、Windows、Linux 分别实现自己的权限与 I/O 后端。
 
-> 当前唯一已完成实现和真机验收的组合是：**Xiaomi Bluetooth Remote 2 Pro / RC003 + macOS**。RC003 Windows 是源码/构建候选（未真机验收，见 `apps/windows/rc003/`），不应理解为已经支持；Linux 和 DJI Mic 2 仍是 planned/research。
+> 当前唯一已完成实现和真机验收的组合是：**Xiaomi Bluetooth Remote 2 Pro / RC003 + macOS**。RC003 Windows 是源码/构建候选：已经在真实 Windows GitHub Actions runner 上通过完整测试与打包流程（未真机验收，见 `apps/windows/rc003/`），不应理解为已经支持；Linux 和 DJI Mic 2 仍是 planned/research。
 
 ## 当前支持矩阵
 

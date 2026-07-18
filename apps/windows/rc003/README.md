@@ -1,16 +1,39 @@
 # Open Voice Bridge · RC003 — Windows client (source/build candidate)
 
-> **Status: source/build candidate, not yet real-device verified.** This
-> directory builds and its pure-Python/contract tests pass on macOS/Linux.
-> Its Windows-only code paths (WinRT BLE, Raw Input, SendInput, PortAudio)
-> are covered by contract tests against fakes/dependency injection that
-> match the documented API shapes as closely as this project can verify
-> without a live Windows/WinRT runtime - that is NOT the same as having run
-> against a real Windows machine or a real Xiaomi Bluetooth Remote 2 Pro /
-> RC003, which has not happened anywhere in this repository or its tests.
-> Do not treat this as "Windows: implemented" — see "Known gaps" below for
-> the full list of what remains to be verified on real hardware, including
-> two real, disclosed architectural uncertainties.
+> **Status: source/build candidate with a real Windows CI run, still not
+> real-device verified.** This directory builds and its pure-Python/
+> contract tests pass on macOS/Linux too. Its Windows-only code paths
+> (WinRT BLE, Raw Input, SendInput, PortAudio) are covered by contract
+> tests against fakes/dependency injection for their exact call shapes,
+> AND additionally run for real on a real `windows-latest` GitHub Actions
+> runner (see `.github/workflows/windows-rc003-ci.yml`): fixed baseline
+> run
+> [29645685087](https://github.com/nijez/open-voice-bridge/actions/runs/29645685087)
+> passed 443 tests (skipped=3, each a documented off-Windows-only gate),
+> including a real WinRT BLE candidate enumeration call, a real Raw Input
+> device-path enumeration call, a real Raw Input hidden message-window
+> listener reaching ready, stopping, joining, and restarting across two
+> full cycles plus a real fail-closed-when-already-running check, a real
+> SendInput key delivery, and a real PortAudio output-endpoint enumeration
+> call - each proving the call actually succeeds against the real
+> OS/WinRT runtime, with no RC003 hardware attached anywhere in that job.
+> The same run also produced a real PyInstaller build, a frozen
+> `--dry-run` smoke check, a real Inno Setup compile, and a real,
+> hash-verified, deterministic three-file (installer + portable ZIP +
+> `SHA256SUMS.txt`) package. A later CI run may report a different test
+> count as the suite grows; the counts above are pinned to this specific
+> baseline run number, not to whichever run happens to be most recent.
+>
+> That is real evidence this code runs on a real Windows machine - it is
+> NOT the same as pairing with, or receiving input/voice from, a real
+> Xiaomi Bluetooth Remote 2 Pro / RC003, which has not happened anywhere
+> in this repository, its tests, or that CI run. This repository and its
+> CI have compiled the installer but have not executed it, and have not
+> validated install or uninstall; the shipped assets are unsigned; no
+> audio driver is bundled; and the "back" button stays unmapped (see
+> below). Do not treat this as "Windows: implemented" — see "Known gaps"
+> below for the full list of what remains to be verified on real
+> hardware, including two real, disclosed architectural uncertainties.
 
 This is a Windows counterpart to this repository's macOS RC003 adapter
 (`Sources/XiaomiRemoteBridgeMac`), covering the same device: button mapping
@@ -45,22 +68,66 @@ Remote 2 Pro / RC003. See the repository root `README.md` and
 
 ### 获取构建产物
 
-本候选目前没有对外发布的正式 Release。可选来源：
+首选来源是本仓库的 Releases 列表页——这是列表页本身，不是指向某个具体
+tag 的链接，因此始终是获取最新预发行版的稳定入口，请直接使用这个地址：
+
+  https://github.com/nijez/open-voice-bridge/releases
+
+在列表中找到本 RC003 Windows 候选对应的预发行版（预发行版会明确标记为
+prerelease，发布说明会写清楚它基于哪一次真实 Windows CI 运行）。
+
+预发行版的仓库级 tag（例如 `v0.3.0-windows-rc003-candidate.1`）只是发布
+编号，和资产文件名里的内部构建版本号是两回事：当前内部构建版本号固定为
+`0.1.0-candidate`（来自安装器脚本
+`installer/OpenVoiceBridgeRC003Setup.iss` 的 `AppVersion`）。不要因为
+文件名里的版本号和 tag 不一致就怀疑下载错了文件，具体对应关系以该
+预发行版自己的发布说明为准。
+
+每个 RC003 Windows 候选预发行版恰好包含以下三个文件，文件名精确匹配这个模式（下面的
+`<版本号>` 就是上面说的内部构建版本号，不是 tag）：
+
+- `OpenVoiceBridgeRC003Setup-<版本号>-unsigned.exe`——安装器；
+- `OpenVoiceBridgeRC003-<版本号>-portable-unsigned.zip`——便携版（解压后
+  得到一个已带版本号的顶层文件夹，里面除程序本体外还包含
+  LICENSE.txt/COPYRIGHT.txt/THIRD_PARTY_NOTICES.md/ATTRIBUTION.md/
+  README.txt，和安装器携带的说明与授权文件相同）；
+- `SHA256SUMS.txt`——覆盖以上两个文件的哈希清单，来自同一次构建，用于
+  上一节"系统要求"所说的哈希核对。
+
+只需要下载安装器**或**便携版其中一个，不需要两个都下载；两者内容等价，
+都来自同一次真实 Windows CI 运行——安装器会安装到当前用户目录，便携版
+解压即用、不需要安装。
+
+也可以使用以下备选来源：
 
 - `.github/workflows/windows-rc003-ci.yml` 在真实 Windows GitHub Actions
-  runner 上产出的未签名便携版 ZIP、安装器 `.exe` 与
-  `SHA256SUMS.txt`——下载后请自行核对哈希再使用；
+  runner 上产出的、结构相同的未签名便携版 ZIP、安装器 `.exe` 与
+  `SHA256SUMS.txt`（作为该次 CI 运行的构建产物而不是正式发布，需要登录
+  GitHub 账号后在对应 Actions 运行页面下载）——下载后同样请自行核对哈希
+  再使用；
 - 或在一台 Windows 机器上自行运行 `.\build\build-candidate.ps1` 从源码
   构建（见下方"Building an unsigned candidate"一节）。
 
 ### 安装
 
-运行安装器（或直接使用便携版 ZIP 解压后的可执行文件）：只安装/解压到当前
-用户目录，不请求管理员权限，不设置开机自动启动，不安装任何驱动。安装完成
-后可以选择打开"设置"，但不会自动以无参数方式启动桥接——桥接模式需要在
-Start Menu 中显式点击"启动"。安装器的 Start Menu 分组固定提供"设置"
-"启动""停止""卸载"四个独立入口；主快捷方式与桌面快捷方式默认都打开
-"设置"，不会直接进入桥接模式。
+安装器和便携版是两种不同的使用方式，步骤不完全一样，分别说明如下；
+后面"首次使用、停止/重启、卸载"一节也会按这两种方式分别给出步骤。
+
+**方式一：安装器（提供 Start Menu 入口）**
+
+运行安装器：只安装到当前用户目录，不请求管理员权限，不设置开机自动启动，
+不安装任何驱动。安装完成后可以选择打开"设置"，但不会自动以无参数方式启动
+桥接——桥接模式需要在 Start Menu 中显式点击"启动"。安装器的 Start Menu
+分组固定提供"设置""启动""停止""卸载"四个独立入口；主快捷方式与桌面快捷方式
+默认都打开"设置"，不会直接进入桥接模式。
+
+**方式二：便携版 ZIP（解压即用，没有 Start Menu 入口）**
+
+把便携版 ZIP 解压到你自己选择的目录：不请求管理员权限，不安装任何驱动，
+不写入 Start Menu 或桌面快捷方式，不设置开机自动启动。便携版**没有**
+安装器提供的"设置""启动""停止""卸载"四个 Start Menu 入口，也没有打包
+停止脚本或卸载程序——启动、设置、停止、卸载都需要在解压出的文件夹里
+用命令或任务管理器手动完成，具体步骤见下一节"便携版 ZIP 用户"。
 
 ### 配对 RC003
 
@@ -87,7 +154,16 @@ Windows 默认输入/输出设备。如果要让语音识别/听写软件把 RC0
 
 ### 首次使用、停止/重启、卸载
 
-1. 打开"设置"，在"语音输出设备"下拉框中选择上一节配置好的端点并保存；
+"打开设置并选择语音输出端点""确认按键映射""手动确认 Win+H"这几步在
+两种安装方式下目标一样，但具体怎么打开设置、怎么启动/停止/卸载不同
+——安装器用户走 Start Menu，便携版用户在解压出的文件夹里用命令和任务
+管理器，分别在下面两个小节说明。
+
+**安装器用户**
+
+1. 打开"设置"（Start Menu 中的"Open Voice Bridge · RC003"或
+   "Open Voice Bridge · RC003 设置"），在"语音输出设备"下拉框中选择
+   上一节配置好的端点并保存；
 2. 从 Start Menu 选择"启动 Open Voice Bridge · RC003"启动桥接；
 3. 按一下普通按键（例如方向键、确定键）确认按键映射生效；
 4. 在测试遥控器麦克风键之前，先手动确认 Win+H 语音听写本身能正常工作：
@@ -102,8 +178,44 @@ Windows 默认输入/输出设备。如果要让语音识别/听写软件把 RC0
    否则语音会静默失败（按键仍然可用）；如果手动 Win+H 都无法工作，请先
    解决那个问题，本程序不能让本来就不工作的系统听写变得可用；
 5. 需要时从 Start Menu 选择"停止 Open Voice Bridge · RC003"结束桥接，
-   或从"设置 → 应用"/Start Menu 的"卸载"条目卸载（卸载会先自动停止正在
-   运行的进程）。
+   或从"设置 → 应用"/Start Menu 的"卸载"条目卸载（卸载会先自动停止
+   正在运行的进程，再删除安装时写入的程序文件）。**卸载不会自动删除
+   设置和日志**：`config.json`、`key_bindings.json` 和 `logs\app.log`
+   会一直保留在 `%LOCALAPPDATA%\OpenVoiceBridge\RC003` 下，因为
+   安装脚本没有为这些运行期生成的文件配置卸载删除规则。如果这台
+   电脑上不会再安装任何 RC003 版本（安装器或便携版）、也不需要
+   保留这些设置和日志，可以在卸载完成后手动删除整个
+   `%LOCALAPPDATA%\OpenVoiceBridge\RC003` 文件夹；如果还会用到
+   同一台电脑上的另一个 RC003 安装，请不要删除这个共享目录。
+
+**便携版 ZIP 用户**
+
+便携版没有打包 Start Menu 入口、没有停止脚本，也没有卸载程序；
+下面每一步都在解压出的文件夹里手动执行：
+
+1. 打开 PowerShell，`cd` 到解压出的文件夹，运行
+   `.\OpenVoiceBridgeRC003.exe --settings` 打开设置窗口，
+   在"语音输出设备"下拉框中选择上一节配置好的端点并保存，
+   然后关闭设置窗口；
+2. 在同一个文件夹里运行不带任何参数的
+   `.\OpenVoiceBridgeRC003.exe` 启动桥接（这会直接启动桥接进程本身，
+   不会再打开设置窗口）；
+3. 按一下普通按键（例如方向键、确定键）确认按键映射生效；
+4. 手动确认 Win+H 语音听写的步骤和上面"安装器用户"一节完全相同（打开
+   记事本、光标点进可编辑文本框、按 Win+H、确认联机语音识别已启用、
+   确认系统麦克风输入选择的是 `CABLE Output`），这里不重复；
+5. **停止**：便携版没有停止脚本，也没有 Start Menu 条目——需要打开
+   任务管理器（`Ctrl+Shift+Esc`），在"详细信息"标签页找到
+   `OpenVoiceBridgeRC003.exe` 对应的进程，选择"结束任务"；
+   **卸载/移除**：便携版没有安装程序，不写注册表；删除整个解压出来
+   的文件夹即可移除程序本体。但便携版运行时同样会把 `config.json`、
+   `key_bindings.json` 和 `logs\app.log` 写到
+   `%LOCALAPPDATA%\OpenVoiceBridge\RC003`（和安装器用的是同一个
+   目录）——删除解压文件夹**不会**清除这些设置和日志文件。如果这台
+   电脑上不会再用到任何 RC003 安装（便携版或安装器）、也不需要保留
+   这些设置和日志，可以额外手动删除整个
+   `%LOCALAPPDATA%\OpenVoiceBridge\RC003` 文件夹；如果还会用到
+   同一台电脑上的另一个 RC003 安装，请不要删除这个共享目录。
 
 ### 默认按键映射与固定行为
 
@@ -313,7 +425,11 @@ per-button mapping list.
 - **Settings UI has no clickable photo hotspots.** The repository's RC003
   product photo is shown for reference, but mapping is done via a text list,
   not clickable regions on the image (see `settings_ui.py` docstring for
-  why).
+  why). The repository root `README.md`'s clickable-photo mapping
+  screenshot (`docs/images/rc003-mapping-settings.jpg`) documents the
+  **macOS** app's settings UI only - this Windows candidate has no
+  equivalent screenshot of its own, and none should be assumed to exist
+  until one is actually captured from a real Windows build.
 
 ## Running from source
 
@@ -402,6 +518,13 @@ whenever this subtree changes - every one of those is a required gate
 (XRBM-018: the Inno Setup compile step was promoted from best-effort to
 required), so a failure anywhere fails the whole job. CI has no RC003
 hardware attached, so it cannot and does not exercise real-device behavior.
+Fixed baseline run
+[29645685087](https://github.com/nijez/open-voice-bridge/actions/runs/29645685087)
+passed all 443 tests (skipped=3) and produced a hash-verified,
+deterministic three-file package (installer + portable ZIP +
+`SHA256SUMS.txt`) - a later run may report a different test count as the
+suite grows; see the "中文安装与使用说明" section's "获取构建产物" above
+for how to obtain a published prerelease built the same way.
 
 ## Privacy and provenance
 

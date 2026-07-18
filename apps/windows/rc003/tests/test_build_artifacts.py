@@ -7,6 +7,8 @@ import re
 import unittest
 from pathlib import Path
 
+from ovb_rc003 import config, logging_setup
+
 _RC003_ROOT = Path(__file__).resolve().parents[1]
 _REPO_ROOT = _RC003_ROOT.parents[2]
 _SPEC_PATH = _RC003_ROOT / "build" / "OpenVoiceBridgeRC003.spec"
@@ -972,6 +974,357 @@ class RootDocumentConsistencyTests(unittest.TestCase):
         windows_readme_text = _README_PATH.read_text(encoding="utf-8")
         for text in (self.root_readme_text, windows_readme_text):
             self.assertIn("源码/构建候选", text)
+
+
+_CJK_CHAR_RE = r"[　-〿぀-ヿ㐀-鿿＀-￯]"
+
+
+def _normalize_whitespace(text: str) -> str:
+    """Strips markdown blockquote '>' line markers, then collapses all
+    remaining whitespace (including the line wraps themselves, which are
+    visually joined into flowing prose but stored as physical newlines)
+    into single spaces - so a contract test can assert a multi-word phrase
+    without depending on exactly where a human editor happened to wrap a
+    line, or on the literal '>' markers those wrapped lines carry.
+
+    Unlike English, a CJK line wrap carries no real space in the source
+    author's intended reading (Chinese text has no inter-word spaces at
+    all), so a whitespace run sitting between two CJK characters is
+    dropped entirely rather than collapsed to a single space - otherwise a
+    phrase like "出来的文件夹" that happens to wrap between "出来" and "的"
+    would normalize to "出来 的文件夹" and silently fail an exact-phrase
+    assertion that has nothing to do with the wrap point chosen.
+    """
+
+    text = re.sub(r"(?m)^>\s?", "", text)
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(rf"(?<={_CJK_CHAR_RE}) (?={_CJK_CHAR_RE})", "", text)
+    return text.strip()
+
+
+class PrereleaseDownloadInstructionsContractTests(unittest.TestCase):
+    """XRBM-027: the public prerelease download flow - a generic Releases
+    page link (so it survives a tag not existing yet), the exact asset name
+    patterns the CI packaging step actually produces, and the release-tag
+    vs internal-build-version distinction - must stay documented and must
+    not silently drift from what the CI workflow actually names its
+    outputs (see WindowsCiWorkflowTests above for that side of the
+    contract).
+    """
+
+    def setUp(self):
+        self.text = _README_PATH.read_text(encoding="utf-8")
+        self.iss_text = _ISS_PATH.read_text(encoding="utf-8")
+
+    def test_links_to_the_generic_releases_page_not_a_specific_tag(self):
+        self.assertIn(
+            "https://github.com/nijez/open-voice-bridge/releases", self.text
+        )
+        # Must be the bare list page - a link straight into a specific
+        # /releases/tag/... URL would 404 until that exact tag exists.
+        self.assertNotIn("/releases/tag/", self.text)
+
+    def test_does_not_make_a_time_dependent_claim_about_prerelease_existence(self):
+        # XRBM-027 RETRY 1 correction: a sentence saying "even if there is
+        # currently no published prerelease yet" is temporally awkward and
+        # goes stale the moment the first prerelease is published. The
+        # Releases list must be described as a stable entry point without
+        # asserting anything about whether a prerelease currently exists.
+        self.assertNotIn("还没有发布任何预发行版", self.text)
+        self.assertNotIn("发布后再回来查看", self.text)
+
+    def test_asset_name_patterns_match_the_ci_workflows_actual_output_names(self):
+        # These placeholders must match, character for character, the
+        # deterministic names windows-rc003-ci.yml's packaging step
+        # actually produces - see
+        # WindowsCiWorkflowTests.test_packages_deterministic_zip_and_sha256sums
+        # and .test_portable_staging_directory_is_a_single_versioned_top_level_folder
+        # above, and the .iss OutputBaseFilename below.
+        self.assertIn("OpenVoiceBridgeRC003Setup-<版本号>-unsigned.exe", self.text)
+        self.assertIn(
+            "OpenVoiceBridgeRC003-<版本号>-portable-unsigned.zip", self.text
+        )
+        self.assertIn("SHA256SUMS.txt", self.text)
+        self.assertIn(
+            "OutputBaseFilename=OpenVoiceBridgeRC003Setup-{#AppVersion}-unsigned",
+            self.iss_text,
+        )
+
+    def test_documents_the_release_tag_vs_internal_build_version_distinction(self):
+        self.assertIn("v0.3.0-windows-rc003-candidate.1", self.text)
+        # The doc's claimed internal build version must match the .iss
+        # file's real AppVersion - not just a hardcoded literal that could
+        # silently drift the moment a future task bumps AppVersion without
+        # updating this sentence.
+        version_match = re.search(r'#define AppVersion "([^"]+)"', self.iss_text)
+        self.assertIsNotNone(version_match)
+        self.assertIn(version_match.group(1), self.text)
+
+    def test_installer_and_portable_are_documented_as_either_or_not_both(self):
+        self.assertIn("不需要两个都下载", self.text)
+
+
+class RealWindowsCiEvidenceContractTests(unittest.TestCase):
+    """XRBM-027: the status blockquote's real-CI-run claims (exact test/
+    skip counts, real WinRT/Raw Input/SendInput/PortAudio calls, real
+    PyInstaller/dry-run/Inno Setup/packaging) must stay both present and
+    honest about the hardware/installer-execution limits that remain -
+    checked against normalized whitespace so a future line-wrap edit can't
+    silently break these assertions without changing the actual wording.
+    """
+
+    def setUp(self):
+        self.readme_text = _normalize_whitespace(
+            _README_PATH.read_text(encoding="utf-8")
+        )
+
+    def test_real_run_test_and_skip_counts_are_documented(self):
+        self.assertIn("443 tests", self.readme_text)
+        self.assertIn("skipped=3", self.readme_text)
+
+    def test_counts_are_pinned_to_a_fixed_linked_baseline_run_not_most_recent(self):
+        # XRBM-027 RETRY 1 correction: this diff itself adds 8 new tests, so
+        # a "most recent run passed 443 tests" claim would be false the
+        # moment the next CI run executes (it would report 451). The count
+        # must instead be pinned to, and linked to, one fixed, named run.
+        self.assertIn(
+            "https://github.com/nijez/open-voice-bridge/actions/runs/29645685087",
+            self.readme_text,
+        )
+        self.assertIn("fixed baseline run", self.readme_text)
+        self.assertIn("29645685087", self.readme_text)
+        # The hardcoded "443 tests" claim must never be described as the
+        # "most recent" run's result - only as this specific baseline run's
+        # result, with an explicit note that a later run may differ.
+        self.assertNotIn("the most recent such run passed", self.readme_text.lower())
+        self.assertNotIn("most recent such run passed all 443", self.readme_text)
+        self.assertIn(
+            "a later ci run may report a different test count", self.readme_text.lower()
+        )
+
+    def test_real_api_integration_claims_are_present(self):
+        for phrase in (
+            "real WinRT BLE candidate enumeration call",
+            "real Raw Input device-path enumeration call",
+            "real SendInput key delivery",
+            "real PortAudio output-endpoint enumeration call",
+        ):
+            self.assertIn(phrase, self.readme_text)
+
+    def test_raw_input_hidden_window_lifecycle_is_documented_separately_from_enumeration(self):
+        # XRBM-027 RETRY 1 correction: device-path enumeration
+        # (RawInputWindowsTests.test_enumerate_matching_device_paths_runs_without_raising)
+        # and the hidden message-window listener's real start/stop/join/
+        # restart lifecycle
+        # (RawInputWindowsTests.test_listener_reaches_ready_stops_joins_and_can_restart,
+        # .test_start_fails_closed_when_already_running) are two distinct
+        # real-Windows-CI-proven facts and must each be documented as their
+        # own claim, not collapsed into a single enumeration sentence.
+        enumeration_phrase = "real Raw Input device-path enumeration call"
+        lifecycle_phrase = (
+            "real Raw Input hidden message-window listener reaching ready, "
+            "stopping, joining, and restarting"
+        )
+        self.assertIn(enumeration_phrase, self.readme_text)
+        self.assertIn(lifecycle_phrase, self.readme_text)
+        self.assertNotEqual(enumeration_phrase, lifecycle_phrase)
+        self.assertIn("fail-closed-when-already-running check", self.readme_text)
+
+    def test_hardware_and_installer_execution_limits_remain_prominent(self):
+        self.assertIn("no RC003 hardware attached", self.readme_text)
+        self.assertIn("shipped assets are unsigned", self.readme_text)
+        self.assertIn('"back" button stays unmapped', self.readme_text)
+
+    def test_installer_non_execution_is_scoped_to_this_project_not_universal(self):
+        # XRBM-027 RETRY 1 correction: "has never been executed, installed,
+        # or uninstalled anywhere" overclaims universal knowledge. The
+        # accurate, available evidence is narrower: THIS repository and its
+        # CI compiled the installer but never ran it or validated
+        # install/uninstall - it says nothing about what may have happened
+        # outside this project.
+        self.assertIn(
+            "this repository and its ci have compiled the installer but "
+            "have not executed it, and have not validated install or "
+            "uninstall",
+            self.readme_text.lower(),
+        )
+        self.assertNotIn(
+            "has never been executed, installed, or uninstalled anywhere",
+            self.readme_text,
+        )
+
+    def test_does_not_claim_real_device_pairing_or_voice(self):
+        self.assertIn(
+            "NOT the same as pairing with, or receiving input/voice from, a real",
+            self.readme_text,
+        )
+        self.assertNotIn(
+            "verified on real rc003 hardware", self.readme_text.lower()
+        )
+
+
+class PortableAndInstallerFlowContractTests(unittest.TestCase):
+    """XRBM-027 RETRY 1 correction: the installer and the portable ZIP are
+    materially different distributions - the portable ZIP has no Start
+    Menu entries, no stop script, and no uninstaller, so it must never be
+    told to a user via the installer's Start Menu instructions. Each flow
+    needs its own settings/start/stop/removal steps, and the portable
+    steps must name the real executable and real flags this candidate
+    actually ships (see __main__.py's ``--settings``/no-argument handling
+    and the .spec's ``AppExeName``/``OpenVoiceBridgeRC003.exe``).
+    """
+
+    def setUp(self):
+        self.text = _README_PATH.read_text(encoding="utf-8")
+        self.normalized = _normalize_whitespace(self.text)
+
+    def test_portable_settings_command_is_exact(self):
+        self.assertIn(
+            r".\OpenVoiceBridgeRC003.exe --settings", self.text
+        )
+
+    def test_portable_start_command_has_no_arguments(self):
+        # The no-argument invocation must appear as its own standalone
+        # command - distinct from the "--settings" command above - paired
+        # with prose that says it starts the bridge itself.
+        self.assertIn(
+            r"`.\OpenVoiceBridgeRC003.exe` 启动桥接", self.normalized
+        )
+
+    def test_portable_stop_is_via_task_manager_not_a_stop_script(self):
+        self.assertIn("任务管理器", self.text)
+        self.assertIn("结束任务", self.text)
+        self.assertIn("Ctrl+Shift+Esc", self.text)
+        # Must explicitly say there is no packaged stop script/Start Menu
+        # entry for the portable flow, so this isn't confused with the
+        # installer's "停止" Start Menu shortcut.
+        self.assertIn("便携版没有停止脚本", self.normalized)
+
+    def test_portable_removal_is_deleting_the_extracted_folder(self):
+        self.assertIn("删除整个解压出来的文件夹", self.normalized)
+        self.assertIn("便携版没有安装程序", self.normalized)
+
+    def test_installer_flow_still_retains_start_menu_settings_start_stop_uninstall(self):
+        installer_section_start = self.text.index("方式一：安装器")
+        installer_section_end = self.text.index("方式二：便携版")
+        installer_section = self.text[installer_section_start:installer_section_end]
+        for entry in ("设置", "启动", "停止", "卸载"):
+            self.assertIn(entry, installer_section)
+        self.assertIn("Start Menu", installer_section)
+
+    def test_portable_flow_explicitly_denies_start_menu_entries(self):
+        portable_section_start = self.text.index("方式二：便携版")
+        portable_section_end = self.text.index("### 配对 RC003")
+        portable_section = self.text[portable_section_start:portable_section_end]
+        self.assertIn("没有", portable_section)
+        self.assertIn("Start Menu", portable_section)
+
+    def test_installer_and_portable_steps_are_documented_in_separate_subsections(self):
+        self.assertIn("**安装器用户**", self.text)
+        self.assertIn("**便携版 ZIP 用户**", self.text)
+        installer_index = self.text.index("**安装器用户**")
+        portable_index = self.text.index("**便携版 ZIP 用户**")
+        self.assertLess(installer_index, portable_index)
+
+
+class ConfigLogResidueDisclosureContractTests(unittest.TestCase):
+    """XRBM-027 CORRECTION 1: neither uninstalling via the installer nor
+    deleting the portable ZIP's extracted folder removes the runtime
+    settings/log files, because both write to the same
+    ``config.config_root()`` location and the .iss source has no
+    ``UninstallDelete`` rule for them. Both public docs must disclose this
+    honestly, and the literal path/filename strings they use must be
+    cross-checked against the real runtime constants so a future rename in
+    config.py/logging_setup.py can't silently leave the docs wrong.
+    """
+
+    def setUp(self):
+        self.readme_text = _normalize_whitespace(
+            _README_PATH.read_text(encoding="utf-8")
+        )
+        self.installed_readme_text = _normalize_whitespace(
+            _INSTALLED_README_PATH.read_text(encoding="utf-8")
+        )
+        self.both = (self.readme_text, self.installed_readme_text)
+        self.iss_text = _ISS_PATH.read_text(encoding="utf-8")
+
+    def test_documented_path_and_filenames_match_the_real_runtime_constants(self):
+        # Not hardcoded literals independent of the source of truth: derive
+        # the exact strings from config.py/logging_setup.py themselves, so
+        # a future rename of APP_ID/PRODUCT_ID/CONFIG_FILENAME/
+        # KEY_BINDINGS_FILENAME/LOG_FILENAME breaks this test instead of
+        # silently leaving the docs pointing at a stale path/filename.
+        expected_root = r"%LOCALAPPDATA%\{}\{}".format(
+            config.APP_ID, config.PRODUCT_ID
+        )
+        for text in self.both:
+            self.assertIn(expected_root, text)
+            self.assertIn(config.CONFIG_FILENAME, text)
+            self.assertIn(config.KEY_BINDINGS_FILENAME, text)
+            self.assertIn(logging_setup.LOG_FILENAME, text)
+            # The log file lives in a "logs" subdirectory of config_root(),
+            # not directly inside it (see logging_setup.get_logger()).
+            self.assertIn("logs" + "\\" + logging_setup.LOG_FILENAME, text)
+
+    def test_iss_has_no_uninstall_delete_rule_for_runtime_files(self):
+        # Regression guard for the premise both docs now rely on: if a
+        # future change adds an [UninstallDelete] entry, that's a genuine
+        # behavior change requiring its own runtime/installer-scoped task,
+        # and this doc's "uninstall does not remove settings/logs" claim
+        # would need to be revisited together with it - this test fails
+        # first, loudly, instead of the docs silently going stale.
+        self.assertNotIn("UninstallDelete", self.iss_text)
+
+    def test_uninstall_does_not_claim_full_directory_removal(self):
+        for text in self.both:
+            self.assertNotIn("不留系统级文件", text)
+        # The installed readme previously claimed uninstall deletes "安装
+        # 目录" (the whole install directory) outright - inaccurate, since
+        # config_root() is the SAME directory the installer uses
+        # (DefaultDirName={localappdata}\OpenVoiceBridge\{#AppFolder}) and
+        # runtime-written files there are never enumerated by Setup, so
+        # Inno's uninstaller does not know to remove them.
+        self.assertNotIn(
+            "卸载过程会先自动停止正在运行的桥接进程，再删除安装目录",
+            self.installed_readme_text,
+        )
+
+    def test_both_docs_disclose_settings_and_logs_survive_removal(self):
+        for text in self.both:
+            self.assertIn("卸载不会自动删除设置和日志", text)
+
+    def test_both_docs_offer_conditional_manual_cleanup(self):
+        # Must be conditional (only when no other RC003 install on the same
+        # machine needs the shared directory) - not an unconditional "just
+        # delete it" instruction, since the installer and portable builds
+        # share the exact same config_root() on one machine.
+        for text in self.both:
+            self.assertIn("如果还会用到", text)
+            self.assertIn("请不要删除这个共享目录", text)
+
+    def test_portable_removal_step_names_config_root_not_just_the_extracted_folder(self):
+        # The portable "uninstall/removal" step specifically must not stop
+        # at "delete the extracted folder" - it must name the separate,
+        # shared config_root() location too.
+        portable_section_start = self.readme_text.index("**便携版 ZIP 用户**")
+        portable_section = self.readme_text[portable_section_start:]
+        self.assertIn("但便携版运行时同样会把", portable_section)
+        self.assertIn(config.CONFIG_FILENAME, portable_section)
+
+
+class WindowsPrereleaseAssetScopeContractTests(unittest.TestCase):
+    """XRBM-027 CORRECTION 1: the repository also has a distinct macOS
+    prerelease (v0.2.0, a .dmg) with a different asset set - a bare "every
+    prerelease has exactly these three files" claim in the RC003 Windows
+    doc would be read as also covering that unrelated macOS release.
+    """
+
+    def setUp(self):
+        self.text = _README_PATH.read_text(encoding="utf-8")
+
+    def test_asset_count_claim_is_scoped_to_the_windows_candidate(self):
+        self.assertIn("每个 RC003 Windows 候选预发行版恰好包含以下三个文件", self.text)
+        self.assertNotIn("每个预发行版恰好包含以下三个文件", self.text)
 
 
 if __name__ == "__main__":
