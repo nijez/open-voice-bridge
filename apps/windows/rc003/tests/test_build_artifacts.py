@@ -542,6 +542,69 @@ class WindowsCiWorkflowTests(unittest.TestCase):
             'Compress-Archive -Path "dist/OpenVoiceBridgeRC003/*"', self.text
         )
 
+    def test_compress_archive_uses_terminating_error_handling_not_lastexitcode(self):
+        # XRBM-025 RETRY 1 (controller-accepted self-found blocker):
+        # Compress-Archive is a PowerShell CMDLET, not a native command, so
+        # it never sets $LASTEXITCODE - a stale/unset (always $null in this
+        # step, since nothing native/script-based ran earlier)
+        # $LASTEXITCODE made the old `if ($LASTEXITCODE -ne 0)` guard
+        # unconditionally true, silently exiting the step with code 0
+        # right after the ZIP was built, before the release directory was
+        # ever staged or preflighted. The only correct fix is promoting
+        # this cmdlet's own errors to terminating ones (-ErrorAction Stop)
+        # and handling them with an explicit try/catch that exits nonzero
+        # - never a $LASTEXITCODE inspection after a cmdlet.
+        self.assertIn(
+            "Compress-Archive -Path $stagingDir -DestinationPath $zipPath "
+            "-CompressionLevel Optimal -ErrorAction Stop",
+            self.text,
+        )
+        self.assertIn("try {", self.text)
+        self.assertIn('Write-Error "Compress-Archive failed:', self.text)
+
+    def test_no_lastexitcode_guard_follows_compress_archive(self):
+        # The specific invalid pattern this RETRY removes must never
+        # reappear immediately after Compress-Archive: scan the text
+        # starting right after the Compress-Archive invocation, up to the
+        # next non-blank pwsh statement, and assert it is not a
+        # $LASTEXITCODE check.
+        compress_index = self.text.index(
+            "Compress-Archive -Path $stagingDir -DestinationPath $zipPath"
+        )
+        after_compress = self.text[compress_index:]
+        catch_index = after_compress.index("} catch {")
+        try_catch_block = after_compress[:catch_index]
+        self.assertNotIn("$LASTEXITCODE", try_catch_block)
+
+    def test_compress_archive_failure_exits_nonzero_inside_catch(self):
+        step = self._package_step_text()
+        try_index = step.index(
+            "try {\n            Compress-Archive -Path $stagingDir"
+        )
+        catch_index = step.index("} catch {", try_index)
+        release_dir_index = step.index('$releaseDir = "$env:GITHUB_WORKSPACE', catch_index)
+        catch_block = step[catch_index:release_dir_index]
+        self.assertIn("exit 1", catch_block)
+        self.assertLess(catch_index, release_dir_index)
+
+    def test_successful_archive_continues_into_release_staging_and_preflight(self):
+        # The try/catch's happy path (no explicit "else"/continuation
+        # marker needed - normal PowerShell try/catch control flow) must
+        # fall straight through into the very next statements: installer
+        # discovery, then release-directory staging ($releaseDir), then
+        # the hard preflight - all textually after the try/catch block, in
+        # the same step, none of them behind any other new guard.
+        step = self._package_step_text()
+        try_block_end = step.index("} catch {")
+        installer_lookup_index = step.index(
+            'Get-ChildItem -Path dist/installer -Filter "OpenVoiceBridgeRC003Setup-*-unsigned.exe"'
+        )
+        release_dir_index = step.index('$releaseDir = "$env:GITHUB_WORKSPACE')
+        preflight_index = step.index("$releaseFiles = @(Get-ChildItem -Path $releaseDir -File)")
+        self.assertLess(try_block_end, installer_lookup_index)
+        self.assertLess(installer_lookup_index, release_dir_index)
+        self.assertLess(release_dir_index, preflight_index)
+
     def test_portable_staging_directory_is_a_single_versioned_top_level_folder(self):
         # Compress-Archive given a bare directory path (not a "/*" content
         # glob) wraps that directory itself as the ZIP's one top-level
@@ -570,7 +633,10 @@ class WindowsCiWorkflowTests(unittest.TestCase):
         # the original dist/portable|installer locations - so a stale file
         # left over from a previous run can never leak into an upload.
         step = self._package_step_text()
-        self.assertIn('$releaseDir = "dist/release"', step)
+        self.assertIn(
+            '$releaseDir = "$env:GITHUB_WORKSPACE/apps/windows/rc003/dist/release"',
+            step,
+        )
         self.assertIn(
             "if (Test-Path $releaseDir) { Remove-Item $releaseDir -Recurse -Force }",
             step,
@@ -659,11 +725,57 @@ class WindowsCiWorkflowTests(unittest.TestCase):
         # several independent glob patterns matched something, never that
         # every declared pattern did. The fix uploads a single,
         # already-hard-verified directory instead of a multi-pattern list.
+        #
+        # XRBM-025 RETRY: the single pattern is now the workspace-absolute
+        # wildcard form (see the two tests below for why).
         upload_step = self._upload_step_text()
-        self.assertIn("path: apps/windows/rc003/dist/release", upload_step)
+        self.assertIn(
+            "path: ${{ github.workspace }}/apps/windows/rc003/dist/release/*",
+            upload_step,
+        )
         self.assertNotIn("dist/portable/*.zip", upload_step)
         self.assertNotIn("dist/installer/*.exe", upload_step)
         self.assertNotIn("dist/SHA256SUMS.txt", upload_step)
+        # Exactly one "path:" input line, and it is a single scalar pattern
+        # - never a YAML block/flow list of multiple patterns.
+        self.assertEqual(upload_step.count("path:"), 1)
+        self.assertNotIn("path: |", upload_step)
+        self.assertNotIn("path:\n", upload_step)
+
+    def test_release_dir_is_workspace_absolute_not_working_directory_relative(self):
+        # XRBM-025 red evidence: run 29643870781's upload-artifact@v7 step
+        # failed "No files were found with the provided path:
+        # apps/windows/rc003/dist/release" - a working-directory-relative
+        # producer path ($releaseDir = "dist/release", resolved against
+        # the job's `apps/windows/rc003` defaults.run.working-directory)
+        # and the upload step's own relative path input carry no
+        # guarantee of resolving to the same directory. $releaseDir must
+        # now be anchored on $env:GITHUB_WORKSPACE so packaging/preflight
+        # always operate on an explicit absolute directory, removing that
+        # ambiguity.
+        step = self._package_step_text()
+        self.assertIn("$env:GITHUB_WORKSPACE", step)
+        self.assertNotIn('$releaseDir = "dist/release"', step)
+
+    def test_producer_and_consumer_resolve_the_same_absolute_release_directory(self):
+        # Proves equivalence, not just that each string exists in
+        # isolation: the pwsh producer ($releaseDir) and the YAML consumer
+        # (upload-artifact `path:`) must both be built from the SAME
+        # workspace-root variable (`$env:GITHUB_WORKSPACE` and
+        # `${{ github.workspace }}` are GitHub Actions' own two spellings
+        # of the identical absolute value) joined with the identical
+        # repository-relative suffix "apps/windows/rc003/dist/release" -
+        # so producer and consumer can never again silently diverge the
+        # way the relative forms did in run 29643870781.
+        package_step = self._package_step_text()
+        upload_step = self._upload_step_text()
+        release_suffix = "apps/windows/rc003/dist/release"
+        self.assertIn(
+            "$env:GITHUB_WORKSPACE/" + release_suffix, package_step
+        )
+        self.assertIn(
+            "${{ github.workspace }}/" + release_suffix + "/*", upload_step
+        )
 
     def test_does_not_falsely_claim_zero_sendinput_or_raw_input_usage(self):
         # XRBM-022: the prior comment falsely claimed the job "does not

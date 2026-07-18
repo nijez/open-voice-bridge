@@ -199,8 +199,25 @@ jobs:
 
           $zipPath = "dist/portable/OpenVoiceBridgeRC003-$version-portable-unsigned.zip"
           if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
-          Compress-Archive -Path $stagingDir -DestinationPath $zipPath -CompressionLevel Optimal
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          # XRBM-025 RETRY 1 (controller-accepted self-found blocker):
+          # Compress-Archive is a PowerShell CMDLET, not a native/external
+          # command, so it never sets $LASTEXITCODE - a stale/unset
+          # $LASTEXITCODE from before this step (here, always $null, since
+          # nothing native/script-based ran earlier in this same step) made
+          # `if ($LASTEXITCODE -ne 0)` unconditionally true ($null -ne 0),
+          # so `exit $LASTEXITCODE` silently exited 0 right here, before
+          # the release directory was ever staged or preflighted - the step
+          # still reported green. The correct way to fail this step on a
+          # cmdlet error is `-ErrorAction Stop` (promotes any error this
+          # cmdlet raises to a terminating one) plus an explicit try/catch,
+          # never a $LASTEXITCODE inspection.
+          try {
+            Compress-Archive -Path $stagingDir -DestinationPath $zipPath -CompressionLevel Optimal -ErrorAction Stop
+          } catch {
+            Write-Error "Compress-Archive failed: $_"
+            exit 1
+          }
 
           $installerExe = Get-ChildItem -Path dist/installer -Filter "OpenVoiceBridgeRC003Setup-*-unsigned.exe" | Select-Object -First 1
           if (-not $installerExe) {
@@ -221,7 +238,16 @@ jobs:
           # declared input matched. A single pre-verified directory cannot
           # silently drop one of its members the way an unverified
           # multi-pattern path list can.
-          $releaseDir = "dist/release"
+          # XRBM-025 RETRY: workspace-absolute, not working-directory-
+          # relative. Red evidence this fixes: run 29643870781's
+          # upload-artifact@v7 step failed "No files were found with the
+          # provided path: apps/windows/rc003/dist/release" - a relative
+          # producer path and the consumer's relative path input carry no
+          # guarantee of resolving to the same directory. Anchoring both
+          # ends on $env:GITHUB_WORKSPACE / ${{ github.workspace }}
+          # (GitHub Actions documents these as the same absolute value)
+          # removes that ambiguity entirely.
+          $releaseDir = "$env:GITHUB_WORKSPACE/apps/windows/rc003/dist/release"
           if (Test-Path $releaseDir) { Remove-Item $releaseDir -Recurse -Force }
           New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
 
@@ -304,13 +330,19 @@ jobs:
       # published artifact behind. No artifact may be published before
       # every required gate has passed.
       #
-      # XRBM-024 RETRY: path is now the single, already hard-verified
+      # XRBM-024 RETRY: path is the single, already hard-verified
       # dist/release directory - not a multi-pattern list - so the
       # uploaded artifact is exactly and only that directory's flat
       # contents (see the packaging step's preflight above).
+      #
+      # XRBM-025 RETRY: the path input is now the workspace-absolute
+      # equivalent of the producer's $releaseDir plus a single trailing
+      # "/*" wildcard, matching this action's official documentation for
+      # absolute-path/wildcard inputs - still exactly one pattern, never a
+      # multi-pattern list.
       - name: Upload deterministic distribution artifacts (unsigned, never installed/signed/published)
         uses: actions/upload-artifact@v7
         with:
           name: OpenVoiceBridgeRC003-distribution-unsigned
-          path: apps/windows/rc003/dist/release
+          path: ${{ github.workspace }}/apps/windows/rc003/dist/release/*
           if-no-files-found: error
