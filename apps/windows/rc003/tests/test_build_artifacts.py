@@ -1,0 +1,597 @@
+"""Static checks over the build/installer/CI sources themselves - not a
+Windows build, just structural/contract validation that runs anywhere.
+"""
+
+import ast
+import re
+import unittest
+from pathlib import Path
+
+_RC003_ROOT = Path(__file__).resolve().parents[1]
+_REPO_ROOT = _RC003_ROOT.parents[2]
+_SPEC_PATH = _RC003_ROOT / "build" / "OpenVoiceBridgeRC003.spec"
+_ISS_PATH = _RC003_ROOT / "installer" / "OpenVoiceBridgeRC003Setup.iss"
+_CI_PATH = _REPO_ROOT / ".github" / "workflows" / "windows-rc003-ci.yml"
+_PACKAGE_MAIN_PATH = _RC003_ROOT / "src" / "ovb_rc003" / "__main__.py"
+_LAUNCHER_PATH = _RC003_ROOT / "src" / "launcher.py"
+_BUILD_CANDIDATE_PATH = _RC003_ROOT / "build" / "build-candidate.ps1"
+_README_PATH = _RC003_ROOT / "README.md"
+_INSTALLED_README_PATH = _RC003_ROOT / "installer" / "readme-rc003.txt"
+_ROOT_README_PATH = _REPO_ROOT / "README.md"
+_THIRD_PARTY_NOTICES_PATH = _REPO_ROOT / "THIRD_PARTY_NOTICES.md"
+
+
+def _exec_as_top_level_no_package(path: Path, *, module_name: str) -> None:
+    """Reproduces exactly the failure mode PyInstaller's bootloader creates
+    for its ``Analysis()`` entry script: the script's own source is
+    executed as a top-level module with no ``__package__`` at all,
+    regardless of where the file lives on disk (XRBM-021 red baseline, see
+    the XRBM-021 task book). A relative import (``from . import X``) inside
+    that source then raises ``ImportError: attempted relative import with
+    no known parent package`` - independent of what ``__name__`` happens to
+    be, since Python's relative-import resolution keys off ``__package__``,
+    not ``__name__``.
+
+    ``module_name`` deliberately avoids the literal string ``"__main__"``
+    so this stays side-effect-free even against a script that guards its
+    own execution with ``if __name__ == "__main__":`` - the import-time
+    failure this test targets fires (or doesn't) before any such guard
+    could ever run, so a real duplicate of PyInstaller's own ``__name__ ==
+    "__main__"`` is not needed to reproduce or verify the fix.
+    """
+
+    source = path.read_text(encoding="utf-8")
+    code = compile(source, str(path), "exec")
+    namespace = {"__name__": module_name, "__package__": None, "__file__": str(path)}
+    exec(code, namespace)
+
+
+def _strip_hash_comments(text: str) -> str:
+    """Drop '#'-comment lines (Python/.spec files) before scanning for
+    forbidden *directives* - this file's own comments legitimately explain,
+    in prose, which things are deliberately excluded, and that explanation
+    should not itself trip a "must not mention X" check.
+    """
+
+    return "\n".join(
+        line for line in text.splitlines() if not line.strip().startswith("#")
+    )
+
+
+def _strip_semicolon_comments(text: str) -> str:
+    """Same idea as _strip_hash_comments, for Inno Setup's ';' comments."""
+
+    return "\n".join(
+        line for line in text.splitlines() if not line.strip().startswith(";")
+    )
+
+
+def _iss_section(text: str, name: str) -> str:
+    """Extracts one Inno Setup ``[Name]`` section's body.
+
+    A naive ``text.split("[Files]")`` is unsafe here: several of this
+    script's own prose comments legitimately mention another section by
+    its bracketed name (e.g. "...which [UninstallRun] and the Stop
+    shortcut..."), which would silently split on that comment occurrence
+    instead of the real section header. This only matches an actual
+    section header - a line containing nothing but ``[Name]``.
+    """
+
+    match = re.search(
+        rf"(?m)^\[{re.escape(name)}\][ \t]*\r?$\n(.*?)(?=^\[[A-Za-z]+\][ \t]*\r?$|\Z)",
+        text,
+        re.DOTALL,
+    )
+    assert match is not None, f"[{name}] section header not found"
+    return match.group(1)
+
+
+class PyInstallerSpecTests(unittest.TestCase):
+    def test_spec_is_valid_python(self):
+        text = _SPEC_PATH.read_text(encoding="utf-8")
+        ast.parse(text, filename=str(_SPEC_PATH))  # raises SyntaxError on failure
+
+    def test_spec_excludes_other_device_bridges(self):
+        text = _SPEC_PATH.read_text(encoding="utf-8")
+        self.assertIn("bridges.t1", text)
+        self.assertIn("bridges.hanvon", text)
+
+    def test_spec_does_not_reference_vbcable_or_frida_binary(self):
+        # Checked against the *effective* (non-comment) content: this file's
+        # header comment explains in prose that VB-CABLE/Frida binaries are
+        # excluded, which is intentional documentation, not a directive.
+        text = _strip_hash_comments(_SPEC_PATH.read_text(encoding="utf-8")).lower()
+        self.assertNotIn("vbcable", text)
+        self.assertNotIn("vb-cable", text)
+        self.assertNotIn(".dll.xz", text)
+
+    def test_spec_analyzes_the_standalone_launcher_not_the_package_main(self):
+        # XRBM-021: the spec's Analysis() entry script must be
+        # src/launcher.py - analyzing src/ovb_rc003/__main__.py directly
+        # reproduces the red baseline's relative-import failure the moment
+        # the frozen executable runs (see LauncherEntryPointTests below).
+        # Checked against effective (non-comment) content, since this
+        # file's own comment legitimately explains the "not __main__.py"
+        # rule in prose.
+        text = _strip_hash_comments(_SPEC_PATH.read_text(encoding="utf-8"))
+        self.assertIn('SRC_ROOT / "launcher.py"', text)
+        self.assertNotIn('SRC_ROOT / "ovb_rc003" / "__main__.py"', text)
+
+
+class LauncherEntryPointTests(unittest.TestCase):
+    """XRBM-021 In-scope item 1/5: structural regression coverage for the
+    red baseline recorded in the XRBM-021 task book - an isolated
+    PyInstaller 6.21.0 build of the PRE-FIX spec completed, but running the
+    produced executable's `--dry-run` exited 1 with "ImportError: attempted
+    relative import with no known parent package" from `__main__.py`. These
+    tests reproduce that exact failure mode (and its fix) deterministically
+    on any platform, without needing an actual PyInstaller build for every
+    test run - the real isolated-environment build/`--dry-run` smoke test
+    (see XRBM-021's implementation report) is the platform-level
+    confirmation on top of this structural one.
+    """
+
+    def test_analyzing_the_package_main_directly_reproduces_the_red_failure(self):
+        with self.assertRaises(ImportError) as ctx:
+            _exec_as_top_level_no_package(
+                _PACKAGE_MAIN_PATH, module_name="frozen_entry_simulation"
+            )
+        self.assertIn("relative import", str(ctx.exception))
+
+    def test_the_standalone_launcher_exists_outside_the_package(self):
+        self.assertTrue(_LAUNCHER_PATH.is_file())
+        # No parent package: launcher.py must NOT live inside src/ovb_rc003/.
+        self.assertNotEqual(_LAUNCHER_PATH.parent.name, "ovb_rc003")
+
+    def test_the_standalone_launcher_uses_only_an_absolute_import(self):
+        text = _LAUNCHER_PATH.read_text(encoding="utf-8")
+        self.assertIn("from ovb_rc003.__main__ import main", text)
+        # No package-relative import token anywhere in the launcher itself.
+        for line in text.splitlines():
+            stripped = line.strip()
+            self.assertFalse(stripped.startswith("from ."))
+
+    def test_the_standalone_launcher_avoids_the_red_failure(self):
+        # Exercises the SAME no-parent-package execution context that broke
+        # __main__.py above - the launcher's only import is absolute, so it
+        # must succeed here too (ovb_rc003 is importable via this test
+        # suite's own PYTHONPATH=src convention).
+        _exec_as_top_level_no_package(
+            _LAUNCHER_PATH, module_name="frozen_entry_simulation"
+        )  # must not raise
+
+    def test_the_standalone_launcher_still_guards_its_own_execution(self):
+        # Structural check that launcher.py only calls main() when actually
+        # run as a script (mirroring __main__.py's own guard) - it must not
+        # call main() merely by being imported/analyzed.
+        text = _LAUNCHER_PATH.read_text(encoding="utf-8")
+        self.assertIn('if __name__ == "__main__":', text)
+
+
+class InnoSetupScriptTests(unittest.TestCase):
+    def setUp(self):
+        self.text = _ISS_PATH.read_text(encoding="utf-8")
+        self.effective_text = _strip_semicolon_comments(self.text)
+
+    def test_privileges_required_is_lowest(self):
+        self.assertIn("PrivilegesRequired=lowest", self.text)
+
+    def test_no_autostart_shortcut_or_task(self):
+        self.assertNotIn("userstartup", self.effective_text.lower())
+        self.assertNotIn("Tasks: \"startup\"", self.effective_text)
+
+    def test_no_vbcable_reference(self):
+        lower = self.effective_text.lower()
+        self.assertNotIn("vbcable", lower)
+        self.assertNotIn("vb-cable", lower)
+
+    def test_install_dir_uses_open_voice_bridge_namespace(self):
+        self.assertIn(r"{localappdata}\OpenVoiceBridge\{#AppFolder}", self.text)
+
+    def test_app_name_has_no_forbidden_branding(self):
+        self.assertNotIn("2655", self.text)
+        self.assertNotIn("T1RemoteBridge", self.text)
+        self.assertNotIn("V60PenBridge", self.text)
+
+    def test_uninstall_run_stops_the_app_first(self):
+        self.assertIn("stop-app.ps1", self.text)
+
+    def test_stop_app_script_is_both_temp_extractable_and_permanently_installed(self):
+        # XRBM-022: the round-1 defect was that stop-app.ps1 only had a
+        # "dontcopy" [Files] entry (extractable during PrepareToInstall) and
+        # was never actually installed to {app} - so [UninstallRun] and any
+        # Stop shortcut referencing "{app}\stop-app.ps1" pointed at a file
+        # that never existed on disk after install. Both entries must exist.
+        files_section = _iss_section(self.text, "Files")
+        self.assertIn(
+            'Source: "stop-app.ps1"; DestDir: "{app}"; Flags: ignoreversion',
+            files_section,
+        )
+        self.assertIn(
+            'Source: "stop-app.ps1"; DestDir: "{tmp}"; Flags: dontcopy',
+            files_section,
+        )
+
+    def test_uninstall_run_and_a_stop_shortcut_both_target_the_installed_copy(self):
+        # At least two independent references to the installed (not
+        # temp-extracted) copy: [UninstallRun] and an explicit Stop shortcut.
+        self.assertGreaterEqual(self.text.count(r"{app}\stop-app.ps1"), 2)
+
+    def test_primary_start_menu_shortcut_opens_settings_not_bridge(self):
+        self.assertIn(
+            'Name: "{group}\\{#AppName}"; Filename: "{app}\\{#AppExeName}"; Parameters: "--settings"',
+            self.text,
+        )
+
+    def test_desktop_shortcut_opens_settings_not_bridge(self):
+        self.assertIn(
+            'Name: "{userdesktop}\\{#AppName}"; Filename: "{app}\\{#AppExeName}"; '
+            'Parameters: "--settings"; Tasks: desktopicon',
+            self.text,
+        )
+
+    def test_explicit_settings_start_stop_uninstall_shortcuts_all_exist(self):
+        icons_section = _iss_section(self.text, "Icons")
+        self.assertIn("设置", icons_section)
+        self.assertIn("启动 {#AppName}", icons_section)
+        self.assertIn("停止 {#AppName}", icons_section)
+        self.assertIn("卸载 {#AppName}", icons_section)
+
+    def test_postinstall_run_opens_settings_and_never_the_bare_no_arg_bridge(self):
+        run_section = _iss_section(self.text, "Run")
+        self.assertIn("postinstall", run_section)
+        self.assertIn("--settings", run_section)
+        # The bare (no-argument) form would start bridge mode - BLE/HID/audio
+        # - before the user has configured anything. Only one [Run] entry
+        # exists in this file, and it must carry --settings.
+        self.assertEqual(run_section.count("Filename:"), 1)
+
+    def test_copyright_is_packaged_alongside_license_and_notices(self):
+        self.assertIn('DestName: "COPYRIGHT.txt"', self.text)
+        self.assertIn('DestName: "THIRD_PARTY_NOTICES.md"', self.text)
+        self.assertIn('DestName: "LICENSE.txt"', self.text)
+
+
+class WindowsCiWorkflowTests(unittest.TestCase):
+    def setUp(self):
+        self.text = _CI_PATH.read_text(encoding="utf-8")
+
+    def test_targets_windows_runner(self):
+        self.assertIn("windows-latest", self.text)
+
+    def test_scoped_to_rc003_paths(self):
+        self.assertIn("apps/windows/rc003/**", self.text)
+
+    def test_runs_public_boundary_scan(self):
+        self.assertIn("check-public-boundary.ps1", self.text)
+
+    def test_runs_test_suite(self):
+        self.assertIn("unittest discover", self.text)
+
+    def test_attempts_pyinstaller_build(self):
+        self.assertIn("PyInstaller", self.text)
+
+    def test_runs_dry_run_smoke_check(self):
+        self.assertIn("--dry-run", self.text)
+
+    def test_compiles_inno_setup_installer(self):
+        self.assertIn("ISCC.exe", self.text)
+
+    def test_inno_setup_compile_is_a_required_gate_not_best_effort(self):
+        # XRBM-018: promoted from best-effort/continue-on-error to a
+        # required gate - a flaky/missing Inno Setup toolchain on the
+        # runner must fail the job, not be silently skipped. Checked
+        # against the effective (non-comment) YAML: this file's own prose
+        # explains the change using that phrase, which is documentation,
+        # not a directive.
+        self.assertNotIn("continue-on-error", _strip_hash_comments(self.text))
+
+    def test_never_runs_the_compiled_installer(self):
+        lower = self.text.lower()
+        self.assertNotIn("start-process", lower)
+        self.assertNotIn("/verysilent", lower)
+        self.assertNotIn("/silent", lower)
+
+    def test_uses_current_supported_action_majors(self):
+        # XRBM-022: upgrade from checkout@v4/setup-python@v5/upload-artifact@v4.
+        self.assertIn("actions/checkout@v7", self.text)
+        self.assertIn("actions/setup-python@v6", self.text)
+        self.assertEqual(self.text.count("actions/upload-artifact@v7"), 1)
+        self.assertNotIn("actions/checkout@v4", self.text)
+        self.assertNotIn("actions/setup-python@v5", self.text)
+        self.assertNotIn("actions/upload-artifact@v4", self.text)
+
+    def test_exactly_one_upload_step_runs_after_every_required_gate(self):
+        # XRBM-022 controller pre-review correction: an earlier round
+        # uploaded the raw PyInstaller output right after the dry-run smoke
+        # check, BEFORE the Inno Setup compile gate - so a job whose Inno
+        # step then failed could still leave a published artifact behind.
+        # Exactly one upload-artifact step must exist, and it must appear
+        # (textually, which matches step execution order in a linear GitHub
+        # Actions job) after the Inno compile and the deterministic
+        # packaging step.
+        self.assertEqual(self.text.count("uses: actions/upload-artifact@v7"), 1)
+        iscc_index = self.text.index("ISCC.exe")
+        package_index = self.text.index("Compress-Archive")
+        upload_index = self.text.index("uses: actions/upload-artifact@v7")
+        self.assertLess(iscc_index, upload_index)
+        self.assertLess(package_index, upload_index)
+
+    def test_triggers_on_files_the_installer_and_spec_consume_outside_rc003(self):
+        # XRBM-022 controller pre-review correction: the installer (.iss)
+        # packages root COPYRIGHT/LICENSE/THIRD_PARTY_NOTICES.md, and the
+        # device-profiles/xiaomi-rc003.json documents identity/HID facts
+        # this Windows adapter mirrors - none of these live under
+        # apps/windows/rc003/, so the path-scoped trigger above would
+        # otherwise silently skip CI on a change to any of them.
+        #
+        # Matched as an exact YAML list-item LINE (leading "      - "),
+        # not a bare substring: the portable-packaging step below also
+        # quotes some of these same filenames as Copy-Item destination
+        # names (e.g. `(Join-Path $stagingDir "THIRD_PARTY_NOTICES.md")`),
+        # which is unrelated to the push/pull_request trigger list and
+        # must not be counted as a trigger occurrence.
+        for path_trigger in (
+            "COPYRIGHT",
+            "LICENSE",
+            "THIRD_PARTY_NOTICES.md",
+            "device-profiles/xiaomi-rc003.json",
+        ):
+            trigger_line = f'      - "{path_trigger}"'
+            self.assertEqual(
+                self.text.count(trigger_line),
+                2,
+                f'{trigger_line!r} must appear once under push.paths and once under pull_request.paths',
+            )
+
+    def test_pip_cache_uses_the_exact_requirements_dev_path(self):
+        self.assertIn(
+            "cache-dependency-path: apps/windows/rc003/requirements-dev.txt",
+            self.text,
+        )
+
+    def test_test_suite_is_gated_by_resource_warning(self):
+        self.assertIn("-W error::ResourceWarning -m unittest discover", self.text)
+
+    def test_packages_deterministic_zip_and_sha256sums(self):
+        self.assertIn("Compress-Archive", self.text)
+        self.assertIn("Get-FileHash", self.text)
+        self.assertIn("SHA256SUMS.txt", self.text)
+        self.assertIn("-portable-unsigned.zip", self.text)
+
+    def test_portable_zip_stages_license_copyright_notices_attribution_and_readme(self):
+        # XRBM-022 controller pre-review correction: the portable ZIP
+        # previously compressed only the bare PyInstaller output
+        # (dist/OpenVoiceBridgeRC003/*), so a user who only downloaded the
+        # portable ZIP - never the installer - got no license, copyright,
+        # third-party attribution/provenance, or usage instructions at all.
+        # Each of these five files must be staged into the versioned
+        # portable folder, matching what the installer itself packages
+        # (LICENSE.txt/COPYRIGHT.txt/THIRD_PARTY_NOTICES.md) plus the two
+        # extras the installer doesn't need but a bare portable ZIP does
+        # (ATTRIBUTION.md's file-by-file provenance record, and the
+        # installed readme repurposed as README.txt for usage instructions).
+        self.assertIn(
+            'Copy-Item -Path "../../../LICENSE" -Destination (Join-Path $stagingDir "LICENSE.txt")',
+            self.text,
+        )
+        self.assertIn(
+            'Copy-Item -Path "../../../COPYRIGHT" -Destination (Join-Path $stagingDir "COPYRIGHT.txt")',
+            self.text,
+        )
+        self.assertIn(
+            'Copy-Item -Path "../../../THIRD_PARTY_NOTICES.md" -Destination (Join-Path $stagingDir "THIRD_PARTY_NOTICES.md")',
+            self.text,
+        )
+        self.assertIn(
+            'Copy-Item -Path "ATTRIBUTION.md" -Destination (Join-Path $stagingDir "ATTRIBUTION.md")',
+            self.text,
+        )
+        self.assertIn(
+            'Copy-Item -Path "installer/readme-rc003.txt" -Destination (Join-Path $stagingDir "README.txt")',
+            self.text,
+        )
+
+    def test_portable_metadata_files_are_staged_before_compress_archive_runs(self):
+        # Staging each file is necessary but not sufficient - it must also
+        # happen BEFORE Compress-Archive runs, or the ZIP would still be
+        # missing them regardless of the Copy-Item lines existing somewhere
+        # in the step. A linear pwsh script's step order is exactly its
+        # textual (line) order.
+        compress_index = self.text.index("Compress-Archive -Path $stagingDir")
+        for destination_marker in (
+            'Destination (Join-Path $stagingDir "LICENSE.txt")',
+            'Destination (Join-Path $stagingDir "COPYRIGHT.txt")',
+            'Destination (Join-Path $stagingDir "THIRD_PARTY_NOTICES.md")',
+            'Destination (Join-Path $stagingDir "ATTRIBUTION.md")',
+            'Destination (Join-Path $stagingDir "README.txt")',
+        ):
+            self.assertLess(
+                self.text.index(destination_marker),
+                compress_index,
+                f"{destination_marker} must be staged before Compress-Archive runs",
+            )
+
+    def test_compress_archive_targets_the_staging_directory_not_the_bare_built_glob(self):
+        # The archive source must be the STAGING folder (which contains a
+        # copy of the built app plus the five metadata/instruction files
+        # above), never the bare "dist/OpenVoiceBridgeRC003/*" glob
+        # directly - compressing that glob again would silently regress to
+        # the pre-fix "no license/instructions in the ZIP" bug even if the
+        # staging/copy lines above still existed elsewhere in the step.
+        self.assertIn(
+            "Compress-Archive -Path $stagingDir -DestinationPath $zipPath", self.text
+        )
+        self.assertNotIn(
+            'Compress-Archive -Path "dist/OpenVoiceBridgeRC003/*"', self.text
+        )
+
+    def test_portable_staging_directory_is_a_single_versioned_top_level_folder(self):
+        # Compress-Archive given a bare directory path (not a "/*" content
+        # glob) wraps that directory itself as the ZIP's one top-level
+        # entry - required so extracting the portable ZIP produces one
+        # clearly-versioned folder, not loose files scattered at the
+        # archive root.
+        self.assertIn('$stagingName = "OpenVoiceBridgeRC003-$version"', self.text)
+        self.assertIn('$stagingDir = "dist/portable/$stagingName"', self.text)
+
+    def test_does_not_falsely_claim_zero_sendinput_or_raw_input_usage(self):
+        # XRBM-022: the prior comment falsely claimed the job "does not
+        # inject any SendInput/Raw Input event" - the Windows-only tests
+        # under tests/windows/ actually do exercise a real, harmless,
+        # runner-local SendInput call and Raw Input listener lifecycle.
+        lower = self.text.lower()
+        self.assertNotIn("does not inject any sendinput", lower)
+        self.assertIn("sendinput", lower)
+        self.assertIn("raw input", lower)
+
+    def test_disclosure_still_denies_real_hardware_and_installer_execution(self):
+        lower = self.text.lower()
+        self.assertIn("no rc003", lower)
+        self.assertIn("device attached", lower)
+        self.assertIn("run the compiled installer", lower)
+
+
+class BuildCandidateScriptTests(unittest.TestCase):
+    def setUp(self):
+        self.text = _BUILD_CANDIDATE_PATH.read_text(encoding="utf-8")
+
+    def test_test_suite_invocation_is_gated_by_resource_warning(self):
+        # XRBM-022 controller pre-review correction: build-candidate.ps1
+        # must enforce the same -W error::ResourceWarning policy as the CI
+        # workflow's test-suite step, not just document it in prose.
+        self.assertIn("-W error::ResourceWarning -m unittest discover", self.text)
+
+
+class UserFacingDocumentationContractTests(unittest.TestCase):
+    """XRBM-022 controller pre-review correction: structural checks that the
+    public README and the installed readme both actually contain the exact
+    facts/URLs/commands the task book requires, not just prose that a human
+    reviewer has to re-verify by eye every round.
+    """
+
+    def setUp(self):
+        self.readme_text = _README_PATH.read_text(encoding="utf-8")
+        self.installed_readme_text = _INSTALLED_README_PATH.read_text(encoding="utf-8")
+        self.both = (self.readme_text, self.installed_readme_text)
+
+    def test_official_vbcable_url_is_present_in_both_docs(self):
+        for text in self.both:
+            self.assertIn("https://vb-audio.com/Cable/", text)
+
+    def test_checksum_verification_command_is_present_in_both_docs(self):
+        for text in self.both:
+            self.assertIn("Get-FileHash", text)
+            self.assertIn("SHA256", text)
+            self.assertIn("SHA256SUMS.txt", text)
+
+    def test_exact_cable_routing_direction_is_preserved_in_both_docs(self):
+        for text in self.both:
+            self.assertIn("CABLE Input", text)
+            self.assertIn("CABLE Output", text)
+        # The direction itself, not just the two names in any order:
+        # the bridge's own voice-output setting selects CABLE Input, and
+        # the recognizer/system microphone input selects CABLE Output.
+        self.assertIn("语音输出设备", self.readme_text)
+        self.assertIn("CABLE Input", self.readme_text.split("语音输出设备")[1][:80])
+        self.assertIn("语音输出设备", self.installed_readme_text)
+        self.assertIn(
+            "CABLE Input", self.installed_readme_text.split("语音输出设备")[1][:120]
+        )
+
+    def test_win_h_prerequisites_are_concrete_in_both_docs(self):
+        for text in self.both:
+            # Cursor focused in an editable field.
+            self.assertIn("可编辑", text)
+            # Manual Win+H test in Notepad (or another editable field)
+            # BEFORE testing the RC003 itself.
+            self.assertIn("记事本", text)
+            self.assertIn("手动", text)
+            # Windows' own online/networked speech-recognition setting.
+            self.assertIn("联机语音识别", text)
+            # The system/recognizer microphone input must be CABLE Output.
+            self.assertIn("CABLE Output", text)
+
+    def test_win_h_settings_path_is_given_for_both_windows_10_and_11(self):
+        # XRBM-022 controller pre-review correction: the docs claim Windows
+        # 10 1809+ support, but "设置 → 隐私和安全性 → 语音" is the Windows
+        # 11 Settings path only - Windows 10's equivalent page is under
+        # "设置 → 隐私 → 语音" instead. Both families must be named
+        # explicitly so a Windows 10 user isn't sent looking for a menu
+        # that doesn't exist on their system.
+        for text in self.both:
+            self.assertIn("Windows 11", text)
+            self.assertIn("设置 → 隐私和安全性 → 语音", text)
+            self.assertIn("Windows 10", text)
+            self.assertIn("设置 → 隐私 → 语音", text)
+
+    def test_thirteen_button_no_mute_key_and_back_gap_facts_are_present(self):
+        for text in self.both:
+            self.assertIn("13", text)
+            self.assertIn("没有独立的物理静音键", text)
+            self.assertIn("返回", text)
+
+
+class RootDocumentConsistencyTests(unittest.TestCase):
+    """XRBM-022 controller pre-review correction (third round): two public
+    root documents contradicted the RC003 Windows candidate's own
+    documentation. Both contradictions are fixed structurally here so they
+    cannot silently return.
+    """
+
+    def setUp(self):
+        self.root_readme_text = _ROOT_README_PATH.read_text(encoding="utf-8")
+        self.notices_text = _THIRD_PARTY_NOTICES_PATH.read_text(encoding="utf-8")
+
+    def test_root_readme_does_not_lump_windows_in_with_planned_research(self):
+        # Root README.md's status callout previously said "Windows、Linux
+        # 和 DJI Mic 2 仍是 planned/research", directly contradicting the
+        # support-matrix row immediately below it (and
+        # apps/windows/rc003/README.md's own status) that call RC003
+        # Windows a source/build candidate, not merely "planned/research"
+        # (research/planned implies no code exists at all; a source/build
+        # candidate that builds and passes contract tests is further along
+        # than that, even though it is NOT real-device verified).
+        self.assertNotIn(
+            "Windows、Linux 和 DJI Mic 2 仍是 planned/research", self.root_readme_text
+        )
+        # The corrected sentence must still say macOS is the only
+        # real-device-accepted combination, name RC003 Windows as a
+        # source/build candidate that is not real-device verified, and
+        # keep Linux/DJI Mic 2 as planned/research (that part was accurate).
+        self.assertIn("Xiaomi Bluetooth Remote 2 Pro / RC003 + macOS", self.root_readme_text)
+        self.assertIn("RC003 Windows", self.root_readme_text)
+        self.assertIn("源码/构建候选", self.root_readme_text)
+        self.assertIn("未真机验收", self.root_readme_text)
+        self.assertIn("Linux 和 DJI Mic 2 仍是 planned/research", self.root_readme_text)
+
+    def test_third_party_notices_does_not_falsely_deny_all_vbcable_reference(self):
+        # THIRD_PARTY_NOTICES.md previously claimed the Windows candidate
+        # does not "reference VB-CABLE ... in any form" - false:
+        # apps/windows/rc003/README.md and installer/readme-rc003.txt both
+        # document the official VB-Audio VB-CABLE download as an optional,
+        # user-installed endpoint. The accurate claim is narrower: not
+        # bundled/installed/configured/licensed/redistributed BY this
+        # project, and the runtime only ever writes to an explicitly
+        # user-selected endpoint - documentation mentioning the official
+        # download as an option is not a contradiction of that.
+        self.assertNotIn(
+            "does not download, install, configure, or reference VB-CABLE",
+            self.notices_text,
+        )
+        self.assertIn("does not bundle, download, install, configure, license, or redistribute VB-CABLE", self.notices_text)
+        self.assertIn("optional, user-installed", self.notices_text)
+        self.assertIn("explicitly selected", self.notices_text)
+
+    def test_root_readme_and_windows_readme_agree_rc003_windows_is_a_candidate(self):
+        # Cross-file consistency: both docs must describe the RC003 Windows
+        # combination the same way (source/build candidate, not
+        # real-device verified) rather than one calling it a candidate and
+        # the other calling it merely planned/research.
+        windows_readme_text = _README_PATH.read_text(encoding="utf-8")
+        for text in (self.root_readme_text, windows_readme_text):
+            self.assertIn("源码/构建候选", text)
+
+
+if __name__ == "__main__":
+    unittest.main()

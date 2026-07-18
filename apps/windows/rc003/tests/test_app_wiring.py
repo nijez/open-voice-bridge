@@ -1,0 +1,571 @@
+"""App-wiring/thread-safety tests for app.py's RC003App (XRBM-018 DoD 4).
+
+``RC003App.__init__`` is safe to construct off Windows: config/hotkey/
+voice-controller/supervisor setup is pure Python, and the real Win32/WinRT
+calls only happen inside ``_connect_once()``/the HID listener, which these
+tests never call. Constructing a real ``RC003App`` and substituting its
+BLE-session/playback collaborators with lightweight recorders lets these
+tests exercise the actual wiring DECISIONS app.py makes - host hotkey
+failure suppresses MIC_OPEN, playback write failure fails closed and
+requests a reconnect, and that request happens correctly from a real
+worker thread - without any Windows API, matching this project's existing
+"test contracts, not implementation-mirroring fakes" approach.
+
+The host-hotkey-unavailable case doesn't even need mocking: off Windows,
+win32_input.py's ``_require_windows()`` genuinely raises
+``Win32InputUnavailableError`` on every call, so it exercises the exact
+"hotkey failed to deliver" branch app.py must fail closed on - not a stand-
+in for it.
+"""
+
+import asyncio
+import tempfile
+import threading
+import unittest
+from pathlib import Path
+
+from ovb_rc003 import app as app_module
+from ovb_rc003 import config, key_mapping, win32_input
+from ovb_rc003.atvv_session import AudioStopped
+
+
+def _run(coro):
+    # Explicitly closing the loop (XRBM-018 review round 2 evidence: a
+    # ResourceWarning for an unclosed test event loop) rather than letting
+    # it be garbage-collected.
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+class _FakeBleSession:
+    def __init__(self, close_raises=False):
+        self.mic_open_calls = 0
+        self.close_raises = close_raises
+        self.close_calls = 0
+
+    def send_mic_open_threadsafe(self):
+        self.mic_open_calls += 1
+
+    async def close(self):
+        self.close_calls += 1
+        if self.close_raises:
+            raise RuntimeError("simulated BLE worker thread that did not stop")
+
+
+class _FakeHidListener:
+    def __init__(self, stop_raises=False):
+        self.stop_raises = stop_raises
+        self.stop_calls = 0
+
+    def stop(self):
+        self.stop_calls += 1
+        if self.stop_raises:
+            raise RuntimeError("simulated Raw Input listener thread that did not stop")
+
+
+class _FakePlaybackSink:
+    def __init__(self, fail_write=False, close_raises=False):
+        self.fail_write = fail_write
+        self.close_raises = close_raises
+        self.write_calls = []
+        self.closed = False
+        self.close_calls = 0
+
+    def write(self, samples):
+        self.write_calls.append(samples)
+        if self.fail_write:
+            raise OSError("simulated PortAudio write failure")
+
+    def close(self):
+        self.close_calls += 1
+        if self.close_raises:
+            raise RuntimeError("simulated PortAudio stream that did not close")
+        self.closed = True
+
+
+class _FakeHidListenerForFailedStart:
+    """XRBM-019 review round 1 P1 #3: a fake standing in for
+    RawInputButtonListener itself (not just its ``start()`` outcome), so
+    ``_start_hid_listener()`` can be exercised end-to-end off Windows -
+    ``is_running`` is the source of truth a failed ``start()`` must consult
+    before deciding whether to keep or discard the owner reference.
+    """
+
+    def __init__(self, is_running_after_failed_start):
+        self._is_running_after_failed_start = is_running_after_failed_start
+        self.start_calls = 0
+
+    @property
+    def is_running(self):
+        return self._is_running_after_failed_start
+
+    def start(self, device_path):
+        self.start_calls += 1
+        raise app_module.raw_input_windows.RawInputUnavailableError("simulated failed start")
+
+    def stop(self):
+        pass
+
+
+def _build_app(tmp_root: Path) -> "app_module.RC003App":
+    # Redirect config_root (and therefore logging_setup's log directory) at
+    # a throwaway temp directory instead of the real machine's config/log
+    # location - RC003App.__init__ always calls config.config_root()/
+    # logging_setup.get_logger(), neither of which touch any Windows API.
+    original = config.config_root
+    config.config_root = lambda: tmp_root
+    try:
+        return app_module.RC003App()
+    finally:
+        config.config_root = original
+
+
+class _AppWiringTestCase(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.app = _build_app(Path(self._tmp.name))
+        self.app._playback = _FakePlaybackSink()
+        self.app._ble_session = _FakeBleSession()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+
+class HostHotkeyFailureSuppressesMicOpenTests(_AppWiringTestCase):
+    """XRBM-014 review round 2 P1 #6: MIC_OPEN must never be sent unless the
+    host hotkey actually, fully delivered.
+    """
+
+    def test_hotkey_unavailable_off_windows_suppresses_mic_open(self):
+        self.app._handle_mic_button_pressed()
+
+        self.assertEqual(self.app._ble_session.mic_open_calls, 0)
+        self.assertFalse(self.app._voice.active)
+
+    def test_hotkey_partial_delivery_suppresses_mic_open(self):
+        def _raise(tokens):
+            raise OSError("simulated partial SendInput delivery")
+
+        original = win32_input.send_key_combo_tap
+        win32_input.send_key_combo_tap = _raise
+        try:
+            self.app._handle_mic_button_pressed()
+        finally:
+            win32_input.send_key_combo_tap = original
+
+        self.assertEqual(self.app._ble_session.mic_open_calls, 0)
+        self.assertFalse(self.app._voice.active)
+
+    def test_hotkey_success_sends_mic_open(self):
+        original = win32_input.send_key_combo_tap
+        win32_input.send_key_combo_tap = lambda tokens: None
+        try:
+            self.app._handle_mic_button_pressed()
+        finally:
+            win32_input.send_key_combo_tap = original
+
+        self.assertEqual(self.app._ble_session.mic_open_calls, 1)
+        self.assertTrue(self.app._voice.active)
+
+    def test_no_usable_endpoint_suppresses_hotkey_and_mic_open(self):
+        self.app._playback = None
+        self.app._config["output_endpoint_name"] = "some endpoint that is not open"
+
+        hotkey_calls = []
+        original = win32_input.send_key_combo_tap
+        win32_input.send_key_combo_tap = lambda tokens: hotkey_calls.append(tokens)
+        try:
+            self.app._handle_mic_button_pressed()
+        finally:
+            win32_input.send_key_combo_tap = original
+
+        self.assertEqual(hotkey_calls, [])
+        self.assertEqual(self.app._ble_session.mic_open_calls, 0)
+
+
+class PlaybackWriteFailureTests(_AppWiringTestCase):
+    """XRBM-014 review round 2 P1 #6: a playback write failure must fail
+    closed (discard the sink) and request a reconnect, not log indefinitely
+    while the device keeps streaming.
+    """
+
+    def test_write_failure_closes_sink_and_requests_reconnect(self):
+        sink = _FakePlaybackSink(fail_write=True)
+        self.app._playback = sink
+        reconnect_calls = []
+        self.app._supervisor.request_reconnect = lambda: reconnect_calls.append(1)
+
+        self.app._on_pcm_frame([0, 0])
+
+        self.assertTrue(sink.closed)
+        self.assertIsNone(self.app._playback)
+        self.assertEqual(reconnect_calls, [1])
+
+    def test_write_success_does_not_touch_playback_or_reconnect(self):
+        reconnect_calls = []
+        self.app._supervisor.request_reconnect = lambda: reconnect_calls.append(1)
+
+        self.app._on_pcm_frame([0, 0])
+
+        self.assertIsNotNone(self.app._playback)
+        self.assertEqual(reconnect_calls, [])
+
+    def test_no_playback_open_is_a_silent_no_op(self):
+        self.app._playback = None
+        reconnect_calls = []
+        self.app._supervisor.request_reconnect = lambda: reconnect_calls.append(1)
+
+        self.app._on_pcm_frame([0, 0])  # must not raise
+
+        self.assertEqual(reconnect_calls, [])
+
+
+class CrossThreadReconnectTests(_AppWiringTestCase):
+    """ble_transport_winrt.py invokes _on_pcm_frame on its own dedicated
+    worker thread, never the event-loop thread - a playback failure there
+    must still correctly reach request_reconnect().
+    """
+
+    def test_on_pcm_frame_failure_from_a_real_worker_thread_requests_reconnect(self):
+        self.app._playback = _FakePlaybackSink(fail_write=True)
+        reconnect_calls = []
+        self.app._supervisor.request_reconnect = lambda: reconnect_calls.append(
+            threading.current_thread()
+        )
+
+        worker = threading.Thread(target=self.app._on_pcm_frame, args=([0, 0],))
+        worker.start()
+        worker.join(timeout=2.0)
+
+        self.assertEqual(len(reconnect_calls), 1)
+        self.assertNotEqual(reconnect_calls[0], threading.main_thread())
+
+
+class CleanupOwnershipTests(_AppWiringTestCase):
+    """XRBM-019 P1 #2/#5: _cleanup_once() must attempt every one of the
+    four steps (voice, HID, BLE, playback) regardless of any single step's
+    outcome, must retain (not clear) the owner reference for a step whose
+    resource reports it is still alive, and must aggregate and raise once
+    every step has been attempted - so ConnectionSupervisor.run_forever()
+    fails the whole retry loop closed instead of starting a fresh connect()
+    generation over resources that might still be live.
+    """
+
+    def test_cleanup_clears_every_owner_on_full_success(self):
+        self.app._hid_listener = _FakeHidListener()
+        self.app._ble_session = _FakeBleSession()
+        self.app._playback = _FakePlaybackSink()
+
+        _run(self.app._cleanup_once())  # must not raise
+
+        self.assertIsNone(self.app._hid_listener)
+        self.assertIsNone(self.app._ble_session)
+        self.assertIsNone(self.app._playback)
+
+    def test_hid_stop_failure_retains_hid_owner_but_still_completes_ble_and_playback(self):
+        hid = _FakeHidListener(stop_raises=True)
+        ble = _FakeBleSession()
+        playback = _FakePlaybackSink()
+        self.app._hid_listener = hid
+        self.app._ble_session = ble
+        self.app._playback = playback
+
+        with self.assertRaises(app_module.CleanupIncompleteError) as ctx:
+            _run(self.app._cleanup_once())
+        self.assertIn("Raw Input listener", str(ctx.exception))
+
+        # Retained, not hidden:
+        self.assertIs(self.app._hid_listener, hid)
+        # Every other step still ran and cleared normally:
+        self.assertEqual(ble.close_calls, 1)
+        self.assertIsNone(self.app._ble_session)
+        self.assertTrue(playback.closed)
+        self.assertIsNone(self.app._playback)
+
+    def test_ble_close_failure_retains_ble_owner_but_still_completes_hid_and_playback(self):
+        hid = _FakeHidListener()
+        ble = _FakeBleSession(close_raises=True)
+        playback = _FakePlaybackSink()
+        self.app._hid_listener = hid
+        self.app._ble_session = ble
+        self.app._playback = playback
+
+        with self.assertRaises(app_module.CleanupIncompleteError) as ctx:
+            _run(self.app._cleanup_once())
+        self.assertIn("BLE session", str(ctx.exception))
+
+        # Retained, not hidden:
+        self.assertIs(self.app._ble_session, ble)
+        self.assertEqual(ble.close_calls, 1)
+        # Every other step still ran and cleared normally:
+        self.assertEqual(hid.stop_calls, 1)
+        self.assertIsNone(self.app._hid_listener)
+        self.assertTrue(playback.closed)
+        self.assertIsNone(self.app._playback)
+
+    def test_both_hid_and_ble_failures_retain_both_owners_and_aggregate(self):
+        hid = _FakeHidListener(stop_raises=True)
+        ble = _FakeBleSession(close_raises=True)
+        playback = _FakePlaybackSink()
+        self.app._hid_listener = hid
+        self.app._ble_session = ble
+        self.app._playback = playback
+
+        with self.assertRaises(app_module.CleanupIncompleteError) as ctx:
+            _run(self.app._cleanup_once())
+        message = str(ctx.exception)
+        self.assertIn("Raw Input listener", message)
+        self.assertIn("BLE session", message)
+
+        self.assertIs(self.app._hid_listener, hid)
+        self.assertIs(self.app._ble_session, ble)
+        # Playback is unconditionally attempted/cleared even though both
+        # owner-retaining steps failed.
+        self.assertTrue(playback.closed)
+        self.assertIsNone(self.app._playback)
+
+    def test_cleanup_failure_propagates_out_of_run_forever_without_a_second_connect(self):
+        """End-to-end: wires _cleanup_once() as the real
+        ConnectionSupervisor.cleanup callable and proves a retained-owner
+        failure ends run_forever() entirely - no second connect()
+        generation is ever attempted over the still-live HID listener.
+        """
+
+        hid = _FakeHidListener(stop_raises=True)
+        self.app._hid_listener = hid
+        self.app._ble_session = _FakeBleSession()
+        self.app._playback = _FakePlaybackSink()
+
+        connect_calls = []
+
+        async def scenario():
+            # ConnectionSupervisor.__init__ captured its ``_loop`` at
+            # construction time (setUp() built self.app synchronously,
+            # off any running loop - see connection_supervisor.py's module
+            # docstring). Rebind it to the loop this coroutine is actually
+            # running on before calling request_reconnect(), exactly as
+            # the real app does by constructing everything inside one
+            # asyncio.run(); otherwise request_reconnect()'s
+            # call_soon_threadsafe hop lands on a loop nothing drives and
+            # run_forever() hangs forever on _disconnect_event.wait()
+            # (XRBM-019 review round 1 P1 #1 - the prior version of this
+            # test only "passed" because that loop mismatch raised into
+            # the cleanup path, never proving the intended behavior).
+            self.app._supervisor._loop = asyncio.get_running_loop()
+            self.app._supervisor._connect = lambda: _record_connect(connect_calls)
+
+            task = asyncio.ensure_future(self.app._supervisor.run_forever())
+            # Let run_forever() run its first connect() and reach the
+            # disconnect_event.wait() suspension point before we end the
+            # attempt explicitly - request_reconnect() is what a real BLE
+            # disconnect/protocol-error/playback-failure callback would
+            # call; nothing here relies on an accidental cross-loop
+            # exception to unblock the wait.
+            await asyncio.sleep(0)
+            self.app._supervisor.request_reconnect()
+
+            # Bounded so a real regression (e.g. cleanup ownership lost
+            # again, or the wait never unblocking) fails the test instead
+            # of hanging the whole suite.
+            with self.assertRaises(app_module.CleanupIncompleteError):
+                await asyncio.wait_for(task, timeout=5.0)
+
+        _run(scenario())
+
+        self.assertEqual(connect_calls, [1])  # only the first attempt ever ran
+        self.assertEqual(self.app._supervisor.attempt_count, 1)
+        # Still retained after the whole supervisor loop ended:
+        self.assertIs(self.app._hid_listener, hid)
+
+
+class StartHidListenerOwnershipTests(_AppWiringTestCase):
+    """XRBM-019 review round 1 P1 #3: RawInputButtonListener intentionally
+    retains its thread/window when its own bounded failed-start cleanup
+    cannot stop them (see raw_input_windows.py's ``_abandon_failed_start``).
+    ``_start_hid_listener()`` must consult ``is_running`` rather than
+    unconditionally clearing ``self._hid_listener`` to ``None`` on any
+    failed ``start()`` - doing so would lose the owner and let a later
+    ``_connect_once()`` generation start a second listener over a still-
+    live one (the exact defect class XRBM-019 exists to eliminate; see
+    also CleanupOwnershipTests' end-to-end supervisor test above, which
+    proves no second connect() generation is ever reached once cleanup
+    itself fails on a retained owner).
+    """
+
+    def _patch_device_discovery(self, fake_listener):
+        original_enumerate = app_module.raw_input_windows.enumerate_matching_device_paths
+        original_select = app_module.hid_identity.select_single_device_path
+        original_listener_cls = app_module.raw_input_windows.RawInputButtonListener
+        app_module.raw_input_windows.enumerate_matching_device_paths = lambda: ["fake-path"]
+        app_module.hid_identity.select_single_device_path = lambda paths: paths[0]
+        app_module.raw_input_windows.RawInputButtonListener = lambda callback: fake_listener
+
+        def _restore():
+            app_module.raw_input_windows.enumerate_matching_device_paths = original_enumerate
+            app_module.hid_identity.select_single_device_path = original_select
+            app_module.raw_input_windows.RawInputButtonListener = original_listener_cls
+
+        return _restore
+
+    def test_a_failed_start_that_is_still_running_retains_the_owner_and_raises(self):
+        fake_listener = _FakeHidListenerForFailedStart(is_running_after_failed_start=True)
+        restore = self._patch_device_discovery(fake_listener)
+        try:
+            with self.assertRaises(app_module.raw_input_windows.RawInputUnavailableError):
+                self.app._start_hid_listener()
+        finally:
+            restore()
+
+        self.assertIs(self.app._hid_listener, fake_listener)
+        self.assertEqual(fake_listener.start_calls, 1)
+
+    def test_a_failed_start_confirmed_stopped_clears_the_owner(self):
+        fake_listener = _FakeHidListenerForFailedStart(is_running_after_failed_start=False)
+        restore = self._patch_device_discovery(fake_listener)
+        try:
+            self.app._start_hid_listener()  # must not raise
+        finally:
+            restore()
+
+        self.assertIsNone(self.app._hid_listener)
+        self.assertEqual(fake_listener.start_calls, 1)
+
+
+class VoiceCleanupFailurePreservesPendingStateTests(_AppWiringTestCase):
+    """XRBM-019 review round 1 P1 #4: reset()/on_audio_stopped() clear
+    VoiceController's owed state before the caller has confirmed the
+    closing action (HOLD's KEY_UP, TOGGLE's closing TAP) actually
+    delivered. A failed delivery must not be recorded as a clean close -
+    _cleanup_once() must restore the pending state and aggregate the
+    failure (after still attempting HID/BLE/playback), and the AudioStopped
+    control-event path must restore the pending state and request a
+    reconnect instead of silently treating the close as successful.
+    """
+
+    def test_cleanup_once_preserves_hold_mode_key_up_on_failure(self):
+        self.app._voice.trigger_mode = key_mapping.VoiceTriggerMode.HOLD
+        self.app._voice.on_mic_button_pressed()
+        self.assertTrue(self.app._voice.holding)
+
+        def _raise(tokens):
+            raise OSError("simulated key-up delivery failure")
+
+        original = win32_input.send_key_combo_up
+        win32_input.send_key_combo_up = _raise
+        try:
+            with self.assertRaises(app_module.CleanupIncompleteError) as ctx:
+                _run(self.app._cleanup_once())
+        finally:
+            win32_input.send_key_combo_up = original
+
+        self.assertIn("voice hotkey", str(ctx.exception))
+        # Restored, not left thinking the key-up landed:
+        self.assertTrue(self.app._voice.holding)
+        self.assertTrue(self.app._voice.active)
+
+    def test_cleanup_once_preserves_toggle_mode_closing_tap_on_failure(self):
+        self.app._voice.trigger_mode = key_mapping.VoiceTriggerMode.TOGGLE
+        self.app._voice.on_mic_button_pressed()
+        self.assertTrue(self.app._voice.active)
+
+        def _raise(tokens):
+            raise OSError("simulated closing-tap delivery failure")
+
+        original = win32_input.send_key_combo_tap
+        win32_input.send_key_combo_tap = _raise
+        try:
+            with self.assertRaises(app_module.CleanupIncompleteError) as ctx:
+                _run(self.app._cleanup_once())
+        finally:
+            win32_input.send_key_combo_tap = original
+
+        self.assertIn("voice hotkey", str(ctx.exception))
+        self.assertTrue(self.app._voice.active)
+
+    def test_audio_stopped_preserves_hold_mode_key_up_on_failure_and_reconnects(self):
+        self.app._voice.trigger_mode = key_mapping.VoiceTriggerMode.HOLD
+        self.app._voice.on_mic_button_pressed()
+
+        reconnect_calls = []
+        self.app._supervisor.request_reconnect = lambda: reconnect_calls.append(1)
+
+        def _raise(tokens):
+            raise OSError("simulated key-up delivery failure")
+
+        original = win32_input.send_key_combo_up
+        win32_input.send_key_combo_up = _raise
+        try:
+            self.app._on_control_event(AudioStopped())
+        finally:
+            win32_input.send_key_combo_up = original
+
+        self.assertTrue(self.app._voice.holding)
+        self.assertEqual(reconnect_calls, [1])
+
+    def test_audio_stopped_preserves_toggle_mode_closing_tap_on_failure_and_reconnects(self):
+        self.app._voice.trigger_mode = key_mapping.VoiceTriggerMode.TOGGLE
+        self.app._voice.on_mic_button_pressed()
+
+        reconnect_calls = []
+        self.app._supervisor.request_reconnect = lambda: reconnect_calls.append(1)
+
+        def _raise(tokens):
+            raise OSError("simulated closing-tap delivery failure")
+
+        original = win32_input.send_key_combo_tap
+        win32_input.send_key_combo_tap = _raise
+        try:
+            self.app._on_control_event(AudioStopped())
+        finally:
+            win32_input.send_key_combo_tap = original
+
+        self.assertTrue(self.app._voice.active)
+        self.assertEqual(reconnect_calls, [1])
+
+
+class PlaybackCleanupOwnershipTests(_AppWiringTestCase):
+    """XRBM-019 review round 1 P1 #5: both _cleanup_once() and
+    _on_pcm_frame() must retain (not discard) the playback sink owner when
+    its own close() call fails - EndpointPlaybackSink owns a PortAudio
+    stream, and clearing the reference would hide an incompletely closed
+    resource and let a reconnect open a second sink over it.
+    """
+
+    def test_cleanup_once_retains_playback_owner_on_close_failure(self):
+        sink = _FakePlaybackSink(close_raises=True)
+        self.app._hid_listener = None
+        self.app._ble_session = _FakeBleSession()
+        self.app._playback = sink
+
+        with self.assertRaises(app_module.CleanupIncompleteError) as ctx:
+            _run(self.app._cleanup_once())
+        self.assertIn("audio playback", str(ctx.exception))
+
+        self.assertIs(self.app._playback, sink)
+        self.assertEqual(sink.close_calls, 1)
+        self.assertFalse(sink.closed)
+
+    def test_on_pcm_frame_write_fail_then_close_raise_retains_owner(self):
+        sink = _FakePlaybackSink(fail_write=True, close_raises=True)
+        self.app._playback = sink
+        reconnect_calls = []
+        self.app._supervisor.request_reconnect = lambda: reconnect_calls.append(1)
+
+        self.app._on_pcm_frame([0, 0])  # must not raise
+
+        # Retained, not discarded - close() also failed:
+        self.assertIs(self.app._playback, sink)
+        self.assertEqual(sink.close_calls, 1)
+        # Still fails closed via reconnect either way:
+        self.assertEqual(reconnect_calls, [1])
+
+
+async def _record_connect(connect_calls):
+    connect_calls.append(1)
+
+
+if __name__ == "__main__":
+    unittest.main()
