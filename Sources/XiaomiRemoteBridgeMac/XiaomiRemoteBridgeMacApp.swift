@@ -28,6 +28,8 @@ private final class XiaomiRemoteBridgeAppDelegate: NSObject, NSApplicationDelega
     private let connectionItem = NSMenuItem(title: "正在初始化蓝牙", action: nil, keyEquivalent: "")
     private let audioItem = NSMenuItem(title: "未选择语音输出设备", action: nil, keyEquivalent: "")
     private let hidItem = NSMenuItem(title: "按键映射未启用", action: nil, keyEquivalent: "")
+    private let bridgeStatusItem = NSMenuItem(title: "桥接已启用", action: nil, keyEquivalent: "")
+    private let bridgeToggleItem = NSMenuItem(title: "停用桥接", action: nil, keyEquivalent: "")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installTerminationSignalHandlers()
@@ -80,13 +82,19 @@ private final class XiaomiRemoteBridgeAppDelegate: NSObject, NSApplicationDelega
         connectionItem.isEnabled = false
         audioItem.isEnabled = false
         hidItem.isEnabled = false
+        bridgeStatusItem.isEnabled = false
+
+        bridgeToggleItem.target = self
+        bridgeToggleItem.action = #selector(toggleBridge)
 
         let menu = NSMenu()
         menu.delegate = self
         menu.addItem(connectionItem)
         menu.addItem(audioItem)
         menu.addItem(hidItem)
+        menu.addItem(bridgeStatusItem)
         menu.addItem(.separator())
+        menu.addItem(bridgeToggleItem)
         menu.addItem(menuItem("立即重新连接", action: #selector(reconnect)))
         menu.addItem(menuItem("打开设置…", action: #selector(showSettings)))
         menu.addItem(menuItem("显示日志", action: #selector(showLog)))
@@ -114,20 +122,44 @@ private final class XiaomiRemoteBridgeAppDelegate: NSObject, NSApplicationDelega
             self?.refreshMenuStatus()
         }
         .store(in: &subscriptions)
+
+        model.$bridgeRuntimeStatus
+            .combineLatest(model.$bridgeEnabled)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.refreshMenuStatus()
+            }
+            .store(in: &subscriptions)
     }
 
     private func refreshMenuStatus() {
         connectionItem.title = model.connectionStatus
         audioItem.title = model.isStreaming ? "语音中" : model.audioStatus
         hidItem.title = model.hidStatus
+        bridgeStatusItem.title = model.bridgeRuntimeStatus
+        bridgeToggleItem.title = model.bridgeEnabled ? "停用桥接" : "启用桥接"
+        let symbol: String
+        if !model.bridgeEnabled {
+            symbol = "pause.circle"
+        } else if model.isStreaming {
+            symbol = "mic.fill"
+        } else {
+            symbol = "dot.radiowaves.left.and.right"
+        }
         statusItem?.button?.image = NSImage(
-            systemSymbolName: model.isStreaming ? "mic.fill" : "dot.radiowaves.left.and.right",
-            accessibilityDescription: model.isStreaming ? "小米遥控器语音中" : "小米遥控器"
+            systemSymbolName: symbol,
+            accessibilityDescription: model.bridgeEnabled
+                ? (model.isStreaming ? "小米遥控器语音中" : "小米遥控器")
+                : "小米遥控器桥接已停用"
         )
     }
 
     @objc private func reconnect() {
         model.reconnect()
+    }
+
+    @objc private func toggleBridge() {
+        model.toggleBridgeEnabled(source: "menu")
     }
 
     @objc private func showSettings() {

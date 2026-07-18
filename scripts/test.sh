@@ -12,6 +12,7 @@ xcrun swiftc \
   "$ROOT/Sources/XiaomiRemoteBridgeMac/RemoteButtons.swift" \
   "$ROOT/Sources/XiaomiRemoteBridgeMac/AppSettings.swift" \
   "$ROOT/Sources/XiaomiRemoteBridgeMac/VoiceFunctionKeyLatch.swift" \
+  "$ROOT/Sources/XiaomiRemoteBridgeMac/LocalMicrophoneArbitration.swift" \
   "$ROOT/Sources/XiaomiRemoteBridgeMac/RemoteVoiceFunctionMapper.swift" \
   "$ROOT/Sources/XiaomiRemoteBridgeMac/AppLogger.swift" \
   "$ROOT/Sources/XiaomiRemoteBridgeMac/TestTone.swift" \

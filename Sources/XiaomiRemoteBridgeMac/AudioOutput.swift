@@ -11,6 +11,35 @@ struct AudioDeviceInfo: Identifiable, Equatable {
 
 enum CoreAudioDeviceCatalog {
     static func outputDevices() -> [AudioDeviceInfo] {
+        devices(scope: kAudioDevicePropertyScopeOutput)
+    }
+
+    static func inputDevices() -> [AudioDeviceInfo] {
+        devices(scope: kAudioDevicePropertyScopeInput)
+    }
+
+    /// UID of the current system default input device, or `nil` if none is set.
+    /// Read only — the app never changes the system default input.
+    static func defaultInputDeviceUID() -> String? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var deviceID = AudioDeviceID(0)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        guard AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            0,
+            nil,
+            &size,
+            &deviceID
+        ) == noErr, deviceID != 0 else { return nil }
+        return stringProperty(deviceID, selector: kAudioDevicePropertyDeviceUID)
+    }
+
+    private static func devices(scope: AudioObjectPropertyScope) -> [AudioDeviceInfo] {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDevices,
             mScope: kAudioObjectPropertyScopeGlobal,
@@ -37,7 +66,7 @@ enum CoreAudioDeviceCatalog {
         ) == noErr else { return [] }
 
         return deviceIDs.compactMap { deviceID in
-            guard outputChannelCount(for: deviceID) > 0,
+            guard channelCount(for: deviceID, scope: scope) > 0,
                   let uid = stringProperty(deviceID, selector: kAudioDevicePropertyDeviceUID),
                   let name = stringProperty(deviceID, selector: kAudioObjectPropertyName)
             else { return nil }
@@ -68,10 +97,13 @@ enum CoreAudioDeviceCatalog {
         return value?.takeUnretainedValue() as String?
     }
 
-    private static func outputChannelCount(for deviceID: AudioDeviceID) -> Int {
+    private static func channelCount(
+        for deviceID: AudioDeviceID,
+        scope: AudioObjectPropertyScope
+    ) -> Int {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyStreamConfiguration,
-            mScope: kAudioDevicePropertyScopeOutput,
+            mScope: scope,
             mElement: kAudioObjectPropertyElementMain
         )
         var size: UInt32 = 0
@@ -106,6 +138,11 @@ final class VirtualAudioOutput {
 
     private(set) var selectedDevice: AudioDeviceInfo?
     private(set) var status = "未选择语音输出设备"
+
+    /// Current output routing, used by the local-microphone feedback-loop guard.
+    var currentOutput: (uid: String, isRunning: Bool) {
+        (selectedDevice?.uid ?? "", engine?.isRunning == true)
+    }
 
     @discardableResult
     func configure(deviceUID: String) -> Bool {
@@ -150,7 +187,9 @@ final class VirtualAudioOutput {
             self.player = player
             selectedDevice = device
             status = "语音输出：\(device.name)"
-            AppLogger.shared.write("AUDIO READY device=\(device.name)")
+            // Log de-identified: the device name/UID is shown in the UI status
+            // above but must never be written to the on-disk log.
+            AppLogger.shared.write("AUDIO READY")
             return true
         } catch {
             status = "启动音频输出失败：\(error.localizedDescription)"
@@ -216,6 +255,13 @@ final class VirtualAudioOutput {
     }
 
     func endSession() {
+        flushPlayer()
+    }
+
+    /// Flushes PCM already queued on the player node — used when the local
+    /// microphone session ends or is preempted so no residual local audio plays
+    /// after RC003 takes over.
+    func flushPending() {
         flushPlayer()
     }
 

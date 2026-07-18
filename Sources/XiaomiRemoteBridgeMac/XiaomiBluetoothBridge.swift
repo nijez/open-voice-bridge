@@ -125,6 +125,11 @@ final class XiaomiBluetoothBridge: NSObject {
     private var microphoneOpened = false
     private var sessionID: UInt8 = 0
     private var lastStopAt: Date?
+    /// Runtime voice gate. When false (bridge runtime disabled) the BLE link and
+    /// its state observation stay live, but the remote must not open the
+    /// microphone, start/continue a stream, or push audio. Independent of the BLE
+    /// connection lifecycle.
+    private var voiceBridgingEnabled = true
 
     private let serviceUUID = CBUUID(string: ATVVProtocol.serviceUUID)
     private let transmitUUID = CBUUID(string: ATVVProtocol.transmitUUID)
@@ -164,6 +169,29 @@ final class XiaomiBluetoothBridge: NSObject {
         }
         resetSession()
         state = .stopped
+    }
+
+    /// Enables/disables the voice bridging path without touching the BLE
+    /// connection. Disabling immediately closes the microphone (if open), stops any
+    /// active stream (which notifies the delegate so the Fn latch, arbiter, and
+    /// audio output are cleaned up), and drops any partial decode state. The link
+    /// stays connected so a re-enable is instant.
+    func setVoiceBridgingEnabled(_ enabled: Bool) {
+        guard enabled != voiceBridgingEnabled else { return }
+        voiceBridgingEnabled = enabled
+        if enabled {
+            AppLogger.shared.write("ATVV VOICE_GATE enabled")
+            return
+        }
+        closeMicrophoneIfNeeded()
+        if streaming {
+            stopStreaming()
+        } else {
+            accumulator.reset()
+            pendingSync = nil
+            decoder.reset()
+        }
+        AppLogger.shared.write("ATVV VOICE_GATE disabled")
     }
 
     func reconnectNow() {
@@ -415,6 +443,10 @@ final class XiaomiBluetoothBridge: NSObject {
                 AppLogger.shared.write("BLE READY name=\(peripheral.name ?? "MI RC")")
             }
         case 0x08:
+            guard ATVVVoiceBridgeGate.allowsVoice(bridgingEnabled: voiceBridgingEnabled) else {
+                AppLogger.shared.write("ATVV MIC_OPEN ignored_bridging_disabled")
+                return
+            }
             guard ATVVSessionGate.canOpenMicrophone(
                 phase: lifecycle,
                 generation: generation,
@@ -431,6 +463,10 @@ final class XiaomiBluetoothBridge: NSObject {
             microphoneOpened = true
             AppLogger.shared.write("ATVV MIC_OPEN request")
         case 0x04:
+            guard ATVVVoiceBridgeGate.allowsVoice(bridgingEnabled: voiceBridgingEnabled) else {
+                AppLogger.shared.write("ATVV STREAM_START ignored_bridging_disabled")
+                return
+            }
             guard ATVVSessionGate.canOpenMicrophone(
                 phase: lifecycle,
                 generation: generation,
@@ -494,6 +530,10 @@ final class XiaomiBluetoothBridge: NSObject {
     }
 
     private func handleAudio(_ data: Data) {
+        guard ATVVVoiceBridgeGate.allowsVoice(bridgingEnabled: voiceBridgingEnabled) else {
+            AppLogger.shared.write("ATVV AUDIO ignored_bridging_disabled")
+            return
+        }
         guard let generation = currentGeneration(),
               ATVVSessionGate.canOpenMicrophone(
                 phase: lifecycle,

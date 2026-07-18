@@ -28,6 +28,7 @@ test "$(plutil -extract CFBundleIdentifier raw -o - "$PLIST")" = \
 test "$(plutil -extract LSUIElement raw -o - "$PLIST")" = "true"
 test "$(plutil -extract LSMinimumSystemVersion raw -o - "$PLIST")" = "11.0"
 test -n "$(plutil -extract NSBluetoothAlwaysUsageDescription raw -o - "$PLIST")"
+test -n "$(plutil -extract NSMicrophoneUsageDescription raw -o - "$PLIST")"
 
 codesign --verify --deep --strict "$APP"
 file "$BINARY" | rg -q 'Mach-O 64-bit executable'
