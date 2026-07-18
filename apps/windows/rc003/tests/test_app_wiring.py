@@ -20,6 +20,7 @@ in for it.
 
 import asyncio
 import logging
+import subprocess
 import sys
 import tempfile
 import threading
@@ -125,10 +126,44 @@ def _build_app(tmp_root: Path) -> "app_module.RC003App":
         config.config_root = original
 
 
+def _build_app_with_owned_loop(tmp_root: Path):
+    """Like _build_app(), but explicitly creates a fresh event loop and sets
+    it as this thread's current loop before constructing the app (XRBM-026).
+
+    RC003App.__init__ builds a ConnectionSupervisor, whose __init__ captures
+    ``loop or asyncio.get_event_loop()`` (connection_supervisor.py) - called
+    here synchronously, off any running loop. Without an owned loop already
+    set, that would silently create-and-cache this thread's implicit default
+    loop the first time any test builds an RC003App - a loop nothing then
+    ever closes (see EventLoopOwnershipRegressionTests for the exact red
+    evidence this reproduces and fixes). Returns ``(app, loop)``; the caller
+    owns ``loop`` and must ``asyncio.set_event_loop(None)`` then
+    ``loop.close()`` it when done - exactly mirroring the real app's own
+    ``asyncio.run(_run())`` construction, which owns and closes its loop too.
+    """
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    app = _build_app(tmp_root)
+    return app, loop
+
+
 class _AppWiringTestCase(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
-        self.app = _build_app(Path(self._tmp.name))
+        # XRBM-026 red evidence (real Windows run 29644660267): 425 tests
+        # passed, then the process printed an ignored "unclosed event loop"
+        # ResourceWarning for a ProactorEventLoop plus two unclosed self-pipe
+        # sockets - AFTER unittest's own summary, so -W error::ResourceWarning
+        # never sees it and the step still exits 0 (a ResourceWarning-turned-
+        # exception raised inside a __del__/finalizer is unraisable; Python
+        # can only print it via sys.unraisablehook, never let it change an
+        # already-computed exit code - see EventLoopOwnershipRegressionTests
+        # below for a deterministic, isolated-subprocess reproduction).
+        # _build_app_with_owned_loop() above threads a per-test owned loop
+        # into ConnectionSupervisor instead - never the ambient, never-closed
+        # default the old bare _build_app() call left behind.
+        self.app, self._loop = _build_app_with_owned_loop(Path(self._tmp.name))
         self.app._playback = _FakePlaybackSink()
         self.app._ble_session = _FakeBleSession()
 
@@ -150,6 +185,12 @@ class _AppWiringTestCase(unittest.TestCase):
             logger.removeHandler(handler)
         logging_setup._configured = False
         self._tmp.cleanup()
+        # XRBM-026: close the loop this test owns (see setUp()) and detach
+        # it as the thread's current loop, so its own eventual __del__ finds
+        # is_closed() already True and stays silent - and so the NEXT test's
+        # setUp() cannot mistake this now-closed loop for a live ambient one.
+        asyncio.set_event_loop(None)
+        self._loop.close()
 
 
 class HostHotkeyFailureSuppressesMicOpenTests(_AppWiringTestCase):
@@ -630,8 +671,14 @@ class LoggingHandlerCleanupRegressionTests(unittest.TestCase):
 
     def test_a_second_app_build_gets_its_own_fresh_handler_after_cleanup(self):
         tmp1 = tempfile.TemporaryDirectory()
+        loop1 = None
         try:
-            _build_app(Path(tmp1.name))
+            # _build_app_with_owned_loop() (not the bare _build_app()): this
+            # test constructs RC003App synchronously, same as
+            # _AppWiringTestCase.setUp() - see XRBM-026's
+            # EventLoopOwnershipRegressionTests for why a bare
+            # asyncio.get_event_loop() call here would leak too.
+            _, loop1 = _build_app_with_owned_loop(Path(tmp1.name))
             logger = logging.getLogger(logging_setup.LOGGER_NAME)
             self.assertEqual(len(logger.handlers), 1)
             handler1 = logger.handlers[0]
@@ -648,13 +695,17 @@ class LoggingHandlerCleanupRegressionTests(unittest.TestCase):
             self.assertIsNone(handler1.stream)
             self.assertEqual(logger.handlers, [])
         finally:
+            asyncio.set_event_loop(None)
+            if loop1 is not None:
+                loop1.close()
             # Must not raise: on Windows this would be the PermissionError
             # from outcome 1 if the handle above were still open.
             tmp1.cleanup()
 
         tmp2 = tempfile.TemporaryDirectory()
+        loop2 = None
         try:
-            _build_app(Path(tmp2.name))
+            _, loop2 = _build_app_with_owned_loop(Path(tmp2.name))
             logger = logging.getLogger(logging_setup.LOGGER_NAME)
             self.assertEqual(len(logger.handlers), 1)
             handler2 = logger.handlers[0]
@@ -667,7 +718,127 @@ class LoggingHandlerCleanupRegressionTests(unittest.TestCase):
             logger.removeHandler(handler2)
             logging_setup._configured = False
         finally:
+            asyncio.set_event_loop(None)
+            if loop2 is not None:
+                loop2.close()
             tmp2.cleanup()
+
+
+class EventLoopOwnershipRegressionTests(unittest.TestCase):
+    """Regression for XRBM-026 red evidence (real Windows run 29644660267):
+    425 tests passed ("OK (skipped=3)"), then the process printed an ignored
+    "unclosed event loop" ResourceWarning for a ProactorEventLoop plus two
+    unclosed self-pipe sockets - AFTER unittest's own summary, so
+    -W error::ResourceWarning never saw it and the step still exited 0.
+
+    Root cause: RC003App.__init__ builds a ConnectionSupervisor, whose
+    __init__ captures ``loop or asyncio.get_event_loop()``
+    (connection_supervisor.py). _build_app() runs synchronously in
+    _AppWiringTestCase.setUp(), off any running loop - unlike the real app,
+    which only ever constructs RC003App inside ``asyncio.run(_run())``
+    (app.py), where get_event_loop() correctly returns asyncio.run()'s own
+    loop. With no running loop and nothing set for this thread,
+    asyncio.get_event_loop() silently creates and caches an implicit
+    default loop - shared by every _AppWiringTestCase subclass's setUp() -
+    that nothing in the old test suite ever closed.
+
+    These tests prove both halves of the fix: (1) the fixed setUp()/
+    tearDown() pattern threads a per-test OWNED loop into ConnectionSupervisor
+    instead of that ambient default, and (2) deterministically forcing the
+    exact condition real interpreter shutdown eventually creates (every
+    strong reference to a loop dropped, including asyncio's own thread-local
+    cache, then a GC pass) reproduces the red evidence exactly for the OLD
+    pattern while the FIXED pattern never reproduces it - in an isolated
+    subprocess, so this test process's own asyncio/event-loop state is never
+    touched either way.
+    """
+
+    def test_build_app_under_the_fixed_setup_pattern_captures_the_owned_loop(self):
+        tmp = tempfile.TemporaryDirectory()
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            app = _build_app(Path(tmp.name))
+            self.assertIs(app._supervisor._loop, loop)
+        finally:
+            logger = logging.getLogger(logging_setup.LOGGER_NAME)
+            for handler in list(logger.handlers):
+                handler.close()
+                logger.removeHandler(handler)
+            logging_setup._configured = False
+            tmp.cleanup()
+            asyncio.set_event_loop(None)
+            loop.close()
+
+        self.assertTrue(loop.is_closed())
+
+    def test_unowned_default_loop_pattern_reproduces_the_exact_red_evidence(self):
+        # The OLD (pre-fix) construction pattern - asyncio.get_event_loop()
+        # with no owned/running loop - run in an isolated subprocess, then
+        # forced through the exact condition real interpreter shutdown
+        # eventually creates. This deterministically reproduces the red
+        # evidence's exact shape: one "unclosed event loop" plus two
+        # "unclosed <socket.socket" warnings, both printed as unraisable
+        # exceptions from inside __del__, while the script's own exit code
+        # still reports 0 - proving why -W error::ResourceWarning alone
+        # could never have caught it.
+        script = (
+            "import asyncio, gc\n"
+            "class _Sup:\n"
+            "    def __init__(self):\n"
+            "        self._loop = asyncio.get_event_loop()\n"
+            "objs = [_Sup() for _ in range(3)]\n"
+            "assert all(o._loop is objs[0]._loop for o in objs)\n"
+            "del objs\n"
+            "asyncio.get_event_loop_policy()._local._loop = None\n"
+            "gc.collect()\n"
+            "print('done')\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-W", "error::ResourceWarning", "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("unclosed event loop", result.stderr)
+        self.assertEqual(result.stderr.count("unclosed <socket.socket"), 2)
+
+    def test_owned_and_closed_loop_pattern_never_reproduces_the_red_evidence(self):
+        # Same forced-shutdown stress as the test above, but using the FIXED
+        # pattern (_AppWiringTestCase.setUp()/tearDown()'s own approach: a
+        # fresh loop is created, set current, then explicitly closed)
+        # instead of the bare default-loop getter - proving the fix, not
+        # just the bug.
+        script = (
+            "import asyncio, gc\n"
+            "class _Sup:\n"
+            "    def __init__(self, loop=None):\n"
+            "        self._loop = loop or asyncio.get_event_loop()\n"
+            "def _build_owned():\n"
+            "    loop = asyncio.new_event_loop()\n"
+            "    asyncio.set_event_loop(loop)\n"
+            "    sup = _Sup()\n"
+            "    asyncio.set_event_loop(None)\n"
+            "    loop.close()\n"
+            "    return sup\n"
+            "objs = [_build_owned() for _ in range(3)]\n"
+            "del objs\n"
+            "asyncio.get_event_loop_policy()._local._loop = None\n"
+            "gc.collect()\n"
+            "print('done')\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-W", "error::ResourceWarning", "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertNotIn("ResourceWarning", result.stderr)
+        self.assertNotIn("unclosed", result.stderr)
 
 
 async def _record_connect(connect_calls):

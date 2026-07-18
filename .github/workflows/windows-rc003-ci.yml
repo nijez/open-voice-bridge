@@ -106,6 +106,25 @@ jobs:
       # instead of silently consuming the runner up to the 360-minute job
       # default - the last test name printed before a timeout cancellation
       # is then the hung test.
+      # XRBM-026 hard gate: a real Windows run (29644660267) completed 425
+      # tests with "OK (skipped=3)", then printed an ignored ResourceWarning
+      # for one unclosed ProactorEventLoop and two unclosed self-pipe
+      # sockets - AFTER unittest's own summary, so this step still exited 0
+      # even under -W error::ResourceWarning. Root cause fixed in
+      # tests/test_app_wiring.py (test-only: RC003App's ConnectionSupervisor
+      # now always captures a per-test OWNED event loop instead of the
+      # implicit, never-closed default). This gate is the second,
+      # independent layer: -W error::ResourceWarning only turns a warning
+      # into an exception at the moment it's raised DURING normal test
+      # execution - a ResourceWarning raised inside a __del__/finalizer at
+      # CPython interpreter shutdown is unraisable (Python can only print it
+      # via sys.unraisablehook) and can never change unittest's own,
+      # already-computed exit code. Capturing the full step output to a file
+      # (via Tee-Object, so the -v/unbuffered live stream to the Actions log
+      # is unaffected) and scanning its CONTENT for these forbidden markers
+      # closes that loophole structurally: it fails the step even if some
+      # future regression again produces a late, exit-code-invisible
+      # warning, from this cause or any other unclosed-resource cause.
       - name: Run test suite
         shell: pwsh
         timeout-minutes: 10
@@ -113,8 +132,32 @@ jobs:
           PYTHONPATH: src
           PYTHONUNBUFFERED: "1"
         run: |
-          python -u -W error::ResourceWarning -m unittest discover -s tests -t . -p "test_*.py" -v
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $logPath = "test-output.log"
+          python -u -W error::ResourceWarning -m unittest discover -s tests -t . -p "test_*.py" -v 2>&1 | Tee-Object -FilePath $logPath
+          $testExitCode = $LASTEXITCODE
+          if ($testExitCode -ne 0) { exit $testExitCode }
+
+          # Patterns match Python's own exact warning-output text, colon
+          # included ("ResourceWarning:" - never a bare "ResourceWarning"):
+          # unittest's own -v output prints fully-qualified test names as
+          # "module.ClassName) ... ok", and this suite's own regression
+          # coverage for THIS gate legitimately names a test class
+          # "ResourceWarningGateReplayTests" - a bare substring match would
+          # make this gate fail on its own passing regression tests. Real
+          # CPython warning/exception output always renders as
+          # "ResourceWarning: <message>" (either "<file>:<line>:
+          # ResourceWarning: ..." from a plain warning, or a bare
+          # "ResourceWarning: <message>" line from an unraisable-exception
+          # traceback dump at interpreter shutdown) - the colon never
+          # appears directly after "ResourceWarning" in any test name.
+          $logContent = Get-Content -Path $logPath -Raw
+          $forbiddenPatterns = @("ResourceWarning:", "unclosed event loop", "unclosed <socket.socket")
+          foreach ($pattern in $forbiddenPatterns) {
+            if ($logContent -match [regex]::Escape($pattern)) {
+              Write-Error "Windows test step log contains forbidden pattern '$pattern' - a late/unraisable ResourceWarning or unclosed resource must never leave this step green (XRBM-026)."
+              exit 1
+            }
+          }
 
       - name: PyInstaller build (unsigned candidate)
         shell: pwsh

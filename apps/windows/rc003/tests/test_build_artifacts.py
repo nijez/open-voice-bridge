@@ -469,6 +469,45 @@ class WindowsCiWorkflowTests(unittest.TestCase):
             '-m unittest discover -s tests -t . -p "test_*.py" -v', run_step_text
         )
 
+    def test_test_suite_step_hard_gates_late_resourcewarning_output(self):
+        # XRBM-026: real Windows run 29644660267 completed 425 tests with
+        # "OK (skipped=3)", then printed an ignored ResourceWarning for one
+        # unclosed ProactorEventLoop and two unclosed self-pipe sockets -
+        # AFTER unittest's own summary, so -W error::ResourceWarning alone
+        # never saw it and the step still exited 0 (a warning-turned-
+        # exception raised inside a __del__/finalizer at interpreter
+        # shutdown is unraisable and cannot change an already-computed exit
+        # code). The step must capture its full output to a file (so the
+        # -v/unbuffered live Actions-log stream is unaffected) and then
+        # scan that file's CONTENT - independent of $LASTEXITCODE - for
+        # every one of these forbidden markers, failing the step if any
+        # appear (see tests/test_resourcewarning_gate_replay.py for the
+        # pure-Python replay of this exact detection logic).
+        run_step_start = self.text.index("- name: Run test suite")
+        next_step_start = self.text.index("- name:", run_step_start + 1)
+        run_step_text = self.text[run_step_start:next_step_start]
+
+        self.assertIn("Tee-Object -FilePath", run_step_text)
+        self.assertIn("Get-Content -Path $logPath -Raw", run_step_text)
+        self.assertIn("[regex]::Escape($pattern)", run_step_text)
+        for pattern in ("ResourceWarning:", "unclosed event loop", "unclosed <socket.socket"):
+            self.assertIn(f'"{pattern}"', run_step_text)
+
+    def test_resourcewarning_pattern_requires_the_colon_to_avoid_self_collision(self):
+        # A bare "ResourceWarning" (no colon) would match this very test
+        # suite's own class name (tests/test_resourcewarning_gate_replay.py's
+        # ResourceWarningGateReplayTests), printed verbatim by unittest's -v
+        # output - making the gate fail on its own passing regression tests.
+        # Real CPython warning/exception output always renders as
+        # "ResourceWarning: <message>", so requiring the colon is both safe
+        # and sufficient (see tests/test_resourcewarning_gate_replay.py for
+        # the full false-positive proof).
+        run_step_start = self.text.index("- name: Run test suite")
+        next_step_start = self.text.index("- name:", run_step_start + 1)
+        run_step_text = self.text[run_step_start:next_step_start]
+        self.assertIn('"ResourceWarning:"', run_step_text)
+        self.assertNotIn('"ResourceWarning",', run_step_text)
+
     def test_packages_deterministic_zip_and_sha256sums(self):
         self.assertIn("Compress-Archive", self.text)
         self.assertIn("Get-FileHash", self.text)
