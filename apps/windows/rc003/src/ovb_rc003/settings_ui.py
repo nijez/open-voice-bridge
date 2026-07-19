@@ -1,34 +1,44 @@
-"""Tk settings window: button mapping list, voice hotkey, output endpoint.
+"""Settings-window pure logic: button mapping list, voice hotkey, output
+endpoint, bridge-launch and log-location status text.
 
-This candidate deliberately ships a text-based mapping list rather than
-clickable hotspots on the RC003 product photo. Reproducing the macOS client's
-pixel-calibrated hotspot coordinates would require re-deriving them without
-the original SwiftUI layout data, which risks fabricating incorrect
-coordinates; the photo (if found via resources.find_remote_photo) is instead
-shown as a static reference image. Clickable hotspots are left as documented
-future work, not simulated here.
-
-Testability (fixed after XRBM-014 review RETRY P1 #7 - see
-XRBM-014's independent review): every piece of validation/save logic
-that used to live inline in ``SettingsWindow._save`` is now a plain,
-Tk-free function (``_action_to_display``, ``_display_to_action``,
-``build_save_model``, ``_endpoint_display``, ``_parse_endpoint_display``)
-that tests call directly, with no Tk widget or window ever constructed - see
+This module is deliberately Tk/Qt-free (XRBM-030 replaced the previous Tk
+view with a PySide6-Essentials + Qt Quick/QML one - see
+``qt_settings_app.py`` and ``qml/`` - but every piece of validation/save/
+launch/log-status logic below is unchanged and stays here so it keeps being
+directly unit-testable without constructing any window at all, matching the
+contract fixed after XRBM-014 review RETRY P1 #7): every piece of
+validation/save logic is a plain function (``_action_to_display``,
+``_display_to_action``, ``build_save_model``, ``_endpoint_display``,
+``_parse_endpoint_display``, ``describe_launch_result``,
+``describe_log_open_result``) that tests call directly - see
 tests/test_settings_ui_helpers.py. The previous bug (the default "mic"
 mapping's display string had no reverse mapping back to
 ``ActionKind.VOICE``, so a user who changed nothing - or clicked "restore
 defaults" - could not save) is covered by an explicit round-trip test on
 ``_VOICE_DISPLAY``.
+
+``main()`` at the bottom of this module is the only place that touches Qt at
+all, and does so via a lazy import inside the function body - importing this
+module (e.g. from ``__main__.py``'s ``--dry-run`` smoke check) never
+requires PySide6 to be installed, the same optional-dependency convention
+this package already uses for ``sounddevice``/``numpy``/``winrt`` (see
+``qt_settings_app.py``'s module docstring for the exact error raised when
+Qt is missing).
 """
 
 from __future__ import annotations
 
-import tkinter as tk
 from dataclasses import dataclass
-from tkinter import messagebox, ttk
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
-from . import audio_output, config, device_profile, hotkey, key_mapping, resources
+from . import (
+    audio_output,
+    bridge_launcher,
+    device_profile,
+    hotkey,
+    key_mapping,
+    logging_setup,
+)
 
 # Preset key-combo choices shown in the mapping dropdown, covering every
 # default action plus a few common alternates. Any other "mod+mod+key" text
@@ -154,8 +164,9 @@ def build_save_model(
     # lifecycle (see app.py) - the runtime never consults a stored "mic"
     # binding at all. Force it to VOICE unconditionally regardless of what
     # button_display_map contained: the settings window no longer offers an
-    # editable mic row (see SettingsWindow._build), but this is the
-    # authoritative, UI-independent guarantee that this save path can never
+    # editable mic row (see ButtonMappingModel in qt_settings_app.py), but
+    # this is the authoritative, UI-independent guarantee that this save
+    # path can never
     # persist a stale/misleading non-voice mic action (XRBM-019 In-scope
     # item 6, folded in from XRBM-018's independent review round 2's
     # product-contract follow-up).
@@ -200,172 +211,74 @@ def default_display_state() -> DefaultDisplayState:
     )
 
 
-class SettingsWindow:
-    """Thin Tk wrapper. All validation/save logic is delegated to the pure
-    functions above; this class only reads/writes Tk widget state.
-    """
+# Bridge-control status text (XRBM-029). Kept as pure, Tk-free functions -
+# same testability contract as the save-model helpers above (see
+# tests/test_settings_ui_helpers.py) - so every one of the four required
+# stable states (not-started / running / already-running / abnormal-quick-
+# exit) is asserted on directly without constructing a window or a real
+# subprocess.
+#
+# Wording contract: a STARTED result is deliberately never described as
+# "RC003 已连接"/"RC003 connected" - only as the process itself still being
+# alive. Whether the bridge actually reached a working BLE/HID/audio
+# connection is only observable from app.log, which every branch below
+# points the user at.
+LAUNCH_NOT_STARTED_TEXT = "未启动（本次设置窗口打开后还没有尝试启动桥接）"
 
-    def __init__(self, master: Optional[tk.Misc] = None) -> None:
-        self._config_root = config.config_root()
-        self._config = config.load_config(config.config_path(self._config_root))
-        self._bindings = config.load_key_bindings(
-            config.key_bindings_path(self._config_root)
+
+def describe_launch_result(result: bridge_launcher.LaunchResult) -> str:
+    if result.outcome is bridge_launcher.LaunchOutcome.STARTED:
+        pid_text = f"（PID {result.pid}）" if result.pid is not None else ""
+        return (
+            f"已启动桥接进程{pid_text}，目前仍在运行。这只说明进程本身存活，"
+            "不代表已经与 RC003 建立连接——请用下方“打开日志目录”查看 app.log "
+            "确认实际连接、按键与语音状态。"
         )
-
-        self.root = tk.Toplevel(master) if master is not None else tk.Tk()
-        self.root.title("Open Voice Bridge · RC003 设置")
-        self._build()
-
-    def _build(self) -> None:
-        photo_path = resources.find_remote_photo()
-        if photo_path is not None:
-            try:
-                image = tk.PhotoImage(file=str(photo_path))
-                label = tk.Label(self.root, image=image)
-                label.image = image  # keep a reference alive
-                label.grid(row=0, column=0, rowspan=20, padx=8, pady=8, sticky="n")
-            except tk.TclError:
-                pass  # PNG support depends on the local Tk build; degrade quietly
-
-        buttons_frame = ttk.LabelFrame(self.root, text="按键映射")
-        buttons_frame.grid(row=0, column=1, sticky="nsew", padx=8, pady=8)
-
-        self._mapping_vars: Dict[str, tk.StringVar] = {}
-        bindings = self._bindings.get("bindings", {})
-        row = 0
-        for button_id in sorted(_USER_FACING_BUTTON_IDS):
-            ttk.Label(buttons_frame, text=button_id).grid(row=row, column=0, sticky="w")
-
-            if button_id == "mic":
-                # Fixed by the ATVV voice lifecycle (see app.py's
-                # _handle_mic_button_pressed/_on_control_event) - the
-                # runtime never consults a stored "mic" binding at all, so
-                # this row must not look editable like the others (XRBM-019
-                # In-scope item 6, folded in from XRBM-018's independent
-                # review round 2's product-contract
-                # follow-up: a setting the runtime silently ignores must
-                # not be presented as configurable). No StringVar is
-                # created for it, so _save()/_restore_defaults() never
-                # touch it either - build_save_model() forces it to VOICE
-                # unconditionally regardless.
-                ttk.Label(buttons_frame, text=_MIC_ROW_DISPLAY).grid(
-                    row=row, column=1, sticky="w"
-                )
-                row += 1
-                continue
-
-            action_dict = bindings.get(button_id)
-            if action_dict is not None:
-                action = key_mapping.ButtonAction.from_dict(action_dict)
-                current_text = _action_to_display(action)
-            else:
-                current_text = ""
-
-            var = tk.StringVar(value=current_text)
-            combo = ttk.Combobox(
-                buttons_frame, textvariable=var, values=_PRESET_KEY_COMBOS, width=24
-            )
-            combo.grid(row=row, column=1, sticky="w")
-            self._mapping_vars[button_id] = var
-            row += 1
-
-        voice_frame = ttk.LabelFrame(self.root, text="麦克风与语音")
-        voice_frame.grid(row=1, column=1, sticky="nsew", padx=8, pady=8)
-
-        ttk.Label(voice_frame, text="语音热键 (mod+mod+key)").grid(row=0, column=0, sticky="w")
-        self._hotkey_var = tk.StringVar(value=self._config.get("voice_hotkey", "win+h"))
-        ttk.Entry(voice_frame, textvariable=self._hotkey_var).grid(row=0, column=1, sticky="w")
-
-        self._trigger_var = tk.StringVar(
-            value=_TRIGGER_MODE_LABELS[
-                key_mapping.VoiceTriggerMode(self._config.get("voice_trigger_mode", "toggle"))
-            ]
+    if result.outcome is bridge_launcher.LaunchOutcome.ALREADY_RUNNING:
+        return (
+            "已经在运行：这次启动被单实例保护拒绝，进程立即退出（退出码 "
+            f"{result.exit_code}）。不需要再次启动；如需重启，请先从任务管理器结束 "
+            "现有 OpenVoiceBridgeRC003 进程，或使用 Start Menu 的“停止”条目/"
+            "便携版的手动停止步骤。"
         )
-        ttk.Label(voice_frame, text="触发方式").grid(row=1, column=0, sticky="w")
-        ttk.Combobox(
-            voice_frame,
-            textvariable=self._trigger_var,
-            values=list(_TRIGGER_MODE_LABELS.values()),
-            state="readonly",
-        ).grid(row=1, column=1, sticky="w")
-
-        output_frame = ttk.LabelFrame(self.root, text="语音输出设备")
-        output_frame.grid(row=2, column=1, sticky="nsew", padx=8, pady=8)
-
-        try:
-            endpoints: List[audio_output.AudioEndpoint] = audio_output.enumerate_output_endpoints()
-            endpoint_display_values = [_endpoint_display(endpoint) for endpoint in endpoints]
-        except audio_output.AudioOutputUnavailableError:
-            endpoint_display_values = []
-
-        ttk.Label(
-            output_frame,
-            text="语音只会写入下方选中且当前存在的设备；未选择或设备缺失时语音静默失败，普通按键仍可用。",
-            wraplength=360,
-        ).grid(row=0, column=0, columnspan=2, sticky="w")
-
-        initial_endpoint_display = ""
-        saved_name = self._config.get("output_endpoint_name", "")
-        if saved_name:
-            saved_host_api = self._config.get("output_endpoint_host_api", "")
-            initial_endpoint_display = _endpoint_display(
-                audio_output.AudioEndpoint(name=saved_name, host_api=saved_host_api)
-            )
-        self._endpoint_var = tk.StringVar(value=initial_endpoint_display)
-        ttk.Combobox(
-            output_frame,
-            textvariable=self._endpoint_var,
-            values=endpoint_display_values,
-            width=48,
-        ).grid(row=1, column=0, columnspan=2, sticky="w")
-
-        button_bar = ttk.Frame(self.root)
-        button_bar.grid(row=3, column=1, sticky="e", padx=8, pady=8)
-        ttk.Button(button_bar, text="恢复全部默认", command=self._restore_defaults).grid(
-            row=0, column=0, padx=4
+    if result.outcome is bridge_launcher.LaunchOutcome.QUICK_EXIT:
+        return (
+            f"启动异常：进程在短时间内退出（退出码 {result.exit_code}），可能没有成功"
+            "建立 BLE/HID/音频连接。请用下方“打开日志目录”查看 app.log 了解具体原因。"
         )
-        ttk.Button(button_bar, text="保存并应用", command=self._save).grid(row=0, column=1, padx=4)
+    # LAUNCH_FAILED
+    return (
+        f"启动失败：无法创建桥接进程（{result.error}）。请用下方“打开日志目录”查看 "
+        "app.log，并确认安装/便携版文件是否完整。"
+    )
 
-    def _restore_defaults(self) -> None:
-        defaults = default_display_state()
-        for button_id, var in self._mapping_vars.items():
-            var.set(defaults.button_display_map.get(button_id, ""))
-        self._hotkey_var.set(defaults.hotkey_text)
-        self._trigger_var.set(defaults.trigger_mode_label)
 
-    def _save(self) -> None:
-        trigger_mode = next(
-            mode
-            for mode, label in _TRIGGER_MODE_LABELS.items()
-            if label == self._trigger_var.get()
+def describe_log_open_result(result: logging_setup.LogOpenResult) -> str:
+    if result.outcome is logging_setup.LogOpenOutcome.OPENED:
+        note = ""
+        if result.location.status is logging_setup.LogLocationStatus.FILE_MISSING:
+            note = "（该目录存在，但 app.log 尚不存在——桥接可能还没有运行过一次，这不是错误。）"
+        return f"已打开日志目录：{result.location.directory}{note}"
+    if result.outcome is logging_setup.LogOpenOutcome.DIRECTORY_MISSING:
+        return (
+            f"日志目录尚不存在：{result.location.directory}。这通常表示桥接程序在这台"
+            "电脑上还没有运行过；本程序不会为了显示而伪造日志。"
         )
-        display_map = {
-            button_id: var.get() for button_id, var in self._mapping_vars.items()
-        }
-        try:
-            new_config, new_bindings = build_save_model(
-                button_display_map=display_map,
-                hotkey_text=self._hotkey_var.get(),
-                trigger_mode=trigger_mode,
-                endpoint_display_text=self._endpoint_var.get(),
-                base_config=self._config,
-                base_bindings=self._bindings,
-            )
-        except SettingsValidationError as exc:
-            title = f"「{exc.button_id}」映射无效" if exc.button_id else "语音热键无效"
-            messagebox.showerror(title, exc.message)
-            return
-
-        self._config = new_config
-        self._bindings = new_bindings
-        config.save_config(config.config_path(self._config_root), self._config)
-        config.save_key_bindings(config.key_bindings_path(self._config_root), self._bindings)
-        messagebox.showinfo("已保存", "设置已保存。重启桥接以应用新的连接/输出设置。")
+    return f"无法打开日志目录（{result.error}）：{result.location.directory}"
 
 
 def main() -> None:
-    window = SettingsWindow()
-    window.root.mainloop()
+    """Launches the Qt Quick/QML settings window (XRBM-030). Imports
+    ``qt_settings_app`` lazily so importing THIS module (e.g. from
+    ``__main__.py``'s ``--dry-run`` smoke check, or from any test that only
+    needs the pure functions above) never requires PySide6 to be installed -
+    see ``qt_settings_app.py``'s module docstring for the exact, clear error
+    raised here if it is missing.
+    """
+
+    from . import qt_settings_app
+
+    qt_settings_app.run_settings_window()
 
 
 if __name__ == "__main__":

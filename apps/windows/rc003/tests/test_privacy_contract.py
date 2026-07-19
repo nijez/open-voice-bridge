@@ -42,6 +42,27 @@ _ELEVATION_MARKERS = (
 
 _FORBIDDEN_BINARY_SUFFIXES = (".exe", ".dll", ".pyd", ".zip", ".xz")
 
+# The SOLE, disclosed exception (XRBM-031): vb_cable_bundle.py launches the
+# THIRD-PARTY vendor's own VB-CABLE setup UI with Windows' "runas"/UAC verb,
+# only from a slot reached by an explicit user click plus a separate
+# explicit confirmation - never to elevate this application's own process,
+# and never for anything but that one vendor-controlled launch. Every other
+# module in this package must stay elevation-free; see
+# test_elevation_exception_is_scoped_to_the_vendor_vb_cable_launch_only
+# below, which proves the exemption is not a blank check.
+_ELEVATION_MARKER_EXEMPT_FILENAMES = frozenset({"vb_cable_bundle.py"})
+
+# vb_cable_bundle.py/windows_diagnostics.py/qt_settings_app.py are the three
+# SANCTIONED, reviewed modules for the explicit vendor-launch/read-only-
+# diagnostics flow (XRBM-031) - qt_settings_app.py's DiagnosticsController
+# only exposes a thin QML-facing wrapper (``launchVbCableSetup``) around
+# vb_cable_bundle.py's own function, with no business logic of its own. A
+# function name referencing VB-CABLE anywhere else would suggest a second,
+# unreviewed install path.
+_VBCABLE_FUNCTION_NAME_SCAN_EXEMPT_FILENAMES = frozenset(
+    {"vb_cable_bundle.py", "windows_diagnostics.py", "qt_settings_app.py"}
+)
+
 
 class NoRealMacAddressLiteralsTests(unittest.TestCase):
     def test_source_files_contain_no_mac_address_literal(self):
@@ -79,21 +100,90 @@ class NoElevationOrAutoDriverTests(unittest.TestCase):
     def test_no_admin_elevation_requested_in_source(self):
         offenders = []
         for path in _PY_FILES:
+            if path.name in _ELEVATION_MARKER_EXEMPT_FILENAMES:
+                continue
             text = path.read_text(encoding="utf-8")
             for marker in _ELEVATION_MARKERS:
                 if marker in text:
                     offenders.append((str(path), marker))
         self.assertEqual(offenders, [], f"elevation marker found: {offenders}")
 
-    def test_no_vbcable_install_function_exists(self):
+    def test_elevation_exception_is_scoped_to_the_vendor_vb_cable_launch_only(self):
+        # Proves the exemption above is not a blank check: the one exempted
+        # file must actually contain the elevation verb (or this exemption
+        # would be dead weight), must never reference the Inno Setup admin
+        # marker or a self-elevation API, and must apply "runas" to the
+        # vendor's own extracted setup path - not this application's own
+        # executable.
+        path = _PACKAGE_ROOT / "vb_cable_bundle.py"
+        text = path.read_text(encoding="utf-8")
+        self.assertIn("runas", text)
+        self.assertNotIn("PrivilegesRequired=admin", text)
+        self.assertNotIn("RequireAdministrator", text)
+        self.assertIn('os.startfile(path, "runas"', text)
+
+    def test_no_vbcable_install_function_exists_outside_the_sanctioned_module(self):
         offenders = []
         for path in _PY_FILES:
+            if path.name in _VBCABLE_FUNCTION_NAME_SCAN_EXEMPT_FILENAMES:
+                continue
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             for node in ast.walk(tree):
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     if "vbcable" in node.name.lower() or "vb_cable" in node.name.lower():
                         offenders.append((str(path), node.name))
-        self.assertEqual(offenders, [], f"VB-CABLE install function found: {offenders}")
+        self.assertEqual(
+            offenders, [], f"VB-CABLE-related function found outside the sanctioned module: {offenders}"
+        )
+
+    def test_vb_cable_bundle_module_never_defines_a_silent_or_auto_install_function(self):
+        path = _PACKAGE_ROOT / "vb_cable_bundle.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        offenders = [
+            node.name
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and (
+                "silent" in node.name.lower()
+                or "auto_install" in node.name.lower()
+                or "autoinstall" in node.name.lower()
+            )
+        ]
+        self.assertEqual(offenders, [])
+
+    def test_vb_cable_bundle_module_never_uses_silent_install_flags(self):
+        path = _PACKAGE_ROOT / "vb_cable_bundle.py"
+        text = path.read_text(encoding="utf-8").lower()
+        for flag in ("/verysilent", "/silent", "/qn", "/quiet", "-silent", "--silent"):
+            self.assertNotIn(flag, text)
+
+    def test_pnputil_never_referenced_anywhere_in_source_except_as_documented_exclusion(self):
+        # vb_cable_bundle.py's own docstring/comments explain, in prose, that
+        # pnputil is never used - the word itself legitimately appears there
+        # (same self-documentation pattern this project already exempts
+        # elsewhere, e.g. readme-rc003.txt's "不包含 T1、V60..." line). Every
+        # OTHER file must never mention it at all, and even inside
+        # vb_cable_bundle.py the word must never share a line with an actual
+        # process-invocation call.
+        offenders = []
+        for path in _PY_FILES:
+            text = path.read_text(encoding="utf-8")
+            if path.name != "vb_cable_bundle.py":
+                if "pnputil" in text.lower():
+                    offenders.append(str(path))
+                continue
+            for line in text.splitlines():
+                lower = line.lower()
+                if "pnputil" not in lower:
+                    continue
+                for invocation_marker in ("subprocess", "os.system", "popen", "startfile"):
+                    if invocation_marker in lower:
+                        offenders.append((str(path), line.strip()))
+        self.assertEqual(offenders, [], f"pnputil reference found: {offenders}")
+
+    def test_vb_cable_bundle_documents_the_pnputil_exclusion(self):
+        path = _PACKAGE_ROOT / "vb_cable_bundle.py"
+        self.assertIn("pnputil", path.read_text(encoding="utf-8").lower())
 
 
 class NoBinariesCommittedTests(unittest.TestCase):

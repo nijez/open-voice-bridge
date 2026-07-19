@@ -9,6 +9,23 @@
 sounddevice==0.5.5
 numpy==2.4.3
 
+# Qt Quick/QML settings window (XRBM-030), replacing the earlier Tk view.
+# PySide6-Essentials is the official Qt-for-Python distribution split that
+# excludes the (separately packaged, heavier) PySide6-Addons modules this
+# project does not use. Per Qt's own documentation, the Qt for Python
+# community edition (what both packages are) is available under open-source
+# terms (LGPLv3, with some modules under GPLv3) or a separate commercial Qt
+# license; this project installs only the open-source community edition
+# from PyPI, under no commercial license - see THIRD_PARTY_NOTICES.md for
+# the full notice. Only settings_ui.py's ``main()``/qt_settings_app.py
+# import PySide6 at all, and only lazily inside a function body (see
+# qt_settings_app.py's module docstring) - importing any other module in
+# this package, or running ``--dry-run``, never requires it. The frozen
+# PyInstaller build always bundles its own Qt runtime (see
+# build/OpenVoiceBridgeRC003.spec), so end users of a packaged release never
+# need to separately install this themselves.
+PySide6-Essentials==6.11.1
+
 # WinRT projections for BLE GATT (Bluetooth Low Energy Generic Attribute
 # Profile) access to the RC003's ATVV voice service.
 #

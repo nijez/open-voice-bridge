@@ -48,9 +48,11 @@ def _print_help() -> None:
 
 def _dry_run() -> int:
     """Imports every first-party module this package ships, without
-    constructing a Tk window, opening a BLE connection, starting Raw Input,
-    or touching an audio device. Importing ``settings_ui`` only imports the
-    ``tkinter`` module - it does not construct any widget or window.
+    constructing a Qt window, opening a BLE connection, starting Raw Input,
+    or touching an audio device. Importing ``settings_ui``/``qt_settings_app``
+    never requires PySide6-Essentials to be installed (XRBM-030): both defer
+    any Qt import to inside a function body, only reached when the settings
+    window is actually opened - see qt_settings_app.py's module docstring.
     """
 
     from . import (  # noqa: F401
@@ -60,6 +62,7 @@ def _dry_run() -> int:
         audio_output,
         audio_playback,
         ble_transport_winrt,
+        bridge_launcher,
         config,
         connection_supervisor,
         device_profile,
@@ -69,9 +72,12 @@ def _dry_run() -> int:
         identity,
         key_mapping,
         logging_setup,
+        qt_settings_app,
         raw_input_windows,
+        remote_layout,
         resources,
         settings_ui,
+        shell_targets,
         single_instance,
         voice_controller,
         win32_input,

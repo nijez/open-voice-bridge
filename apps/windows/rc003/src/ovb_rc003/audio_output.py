@@ -87,19 +87,89 @@ def enumerate_output_endpoints() -> List[AudioEndpoint]:
     never fails on a machine without the optional dependency installed.
     """
 
+    return _enumerate_endpoints("max_output_channels")
+
+
+def enumerate_input_endpoints() -> List[AudioEndpoint]:
+    """Enumerate real Windows recording endpoints via ``sounddevice``/PortAudio
+    (XRBM-031 In-scope item 11): needed only so the diagnostics page can
+    confirm a VB-CABLE ``CABLE Output`` recording endpoint exists alongside
+    the ``CABLE Input`` playback endpoint - this project's own voice path
+    never reads from a recording endpoint itself (see
+    ``resolve_selected_endpoint``, which is playback-only and unchanged).
+    """
+
+    return _enumerate_endpoints("max_input_channels")
+
+
+def _enumerate_endpoints(channel_count_key: str) -> List[AudioEndpoint]:
     try:
         import sounddevice as sd  # type: ignore
     except ImportError as exc:  # pragma: no cover - exercised only on Windows
         raise AudioOutputUnavailableError(
             "the 'sounddevice' package is not installed; cannot enumerate "
-            "audio output endpoints"
+            "audio endpoints"
         ) from exc
 
-    endpoints: List[AudioEndpoint] = []
-    host_apis = sd.query_hostapis()
-    for device in sd.query_devices():
-        if device.get("max_output_channels", 0) <= 0:
-            continue
-        host_api_name = host_apis[device["hostapi"]]["name"] if host_apis else ""
-        endpoints.append(AudioEndpoint(name=device["name"], host_api=host_api_name))
-    return endpoints
+    try:
+        host_apis = sd.query_hostapis()
+        endpoints: List[AudioEndpoint] = []
+        for device in sd.query_devices():
+            if device.get(channel_count_key, 0) <= 0:
+                continue
+            host_api_name = host_apis[device["hostapi"]]["name"] if host_apis else ""
+            endpoints.append(AudioEndpoint(name=device["name"], host_api=host_api_name))
+        return endpoints
+    except AudioOutputUnavailableError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - fail closed on ANY real PortAudio/
+        # sounddevice failure (a raw PortAudioError, an unexpected device
+        # dict shape, etc.) rather than letting it propagate as a
+        # differently-shaped exception callers/tests do not already handle
+        # (XRBM-031 RETRY 1 item 2). The message is deliberately generic -
+        # never str(exc) - since some PortAudio error strings can embed a
+        # real device name/path, which this project's privacy contract
+        # (config.py's FORBIDDEN_KEYS, logging_setup.py) forbids surfacing;
+        # the original exception is still chained via ``from exc`` for a
+        # developer inspecting a real traceback/log.
+        raise AudioOutputUnavailableError(
+            "PortAudio 音频端点查询失败"
+        ) from exc
+
+
+# Canonical VB-CABLE (Basic/Donationware) endpoint display names, as VB-Audio's
+# own driver names them: the playback ("speaker") side the app writes decoded
+# voice PCM to, and the recording ("microphone") side a recognizer reads from.
+# Never used to auto-select anything - only to let the diagnostics page (XRBM-
+# 031) report whether the optional driver is installed, and to recognize the
+# one endpoint the "select detected CABLE Input" action is allowed to persist.
+CABLE_INPUT_NAME = "CABLE Input"
+CABLE_OUTPUT_NAME = "CABLE Output"
+
+
+def _matches_cable_endpoint(name: str, canonical: str) -> bool:
+    """True only if ``name`` is exactly ``canonical``, or ``canonical``
+    followed by a parenthesized host-API/driver decoration Windows/PortAudio
+    commonly appends (e.g. ``"CABLE Input (VB-Audio Virtual Cable)"``) -
+    never a bare substring match, which could also accept an unrelated
+    device whose name merely contains ``canonical`` as a fragment of a
+    longer, different name (e.g. a hypothetical "CABLE Input Splitter Pro").
+    """
+
+    name = name.strip()
+    if name == canonical:
+        return True
+    decorated_prefix = canonical + " ("
+    return name.startswith(decorated_prefix) and name.endswith(")")
+
+
+def is_cable_input_endpoint(name: str) -> bool:
+    """True if ``name`` names VB-CABLE's playback ("CABLE Input") endpoint."""
+
+    return _matches_cable_endpoint(name, CABLE_INPUT_NAME)
+
+
+def is_cable_output_endpoint(name: str) -> bool:
+    """True if ``name`` names VB-CABLE's recording ("CABLE Output") endpoint."""
+
+    return _matches_cable_endpoint(name, CABLE_OUTPUT_NAME)

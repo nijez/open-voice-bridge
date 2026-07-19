@@ -22,6 +22,15 @@ RC003_ROOT = Path(SPECPATH).resolve().parent
 SRC_ROOT = RC003_ROOT / "src"
 REPO_ROOT = RC003_ROOT.parents[2]
 REMOTE_PHOTO = REPO_ROOT / "Resources" / "RC003-remote-photo.png"
+QML_SOURCE_DIR = SRC_ROOT / "ovb_rc003" / "qml"
+# XRBM-031: build/fetch-vb-cable.ps1 (a REQUIRED step in both
+# build-candidate.ps1 and windows-rc003-ci.yml, run before this spec) writes
+# the hash-verified official VB-CABLE base package here. Bundled unmodified
+# as application data (never re-verified/re-hashed at build time - only at
+# RUNTIME, independently, by vb_cable_bundle.verify_bundle() before any
+# extraction) so the frozen build's optional driver-helper page works fully
+# offline on the end-user machine.
+VB_CABLE_BUNDLE_ZIP = RC003_ROOT / "build" / "third_party" / "VBCABLE_Driver_Pack45.zip"
 
 datas = []
 if REMOTE_PHOTO.is_file():
@@ -31,10 +40,37 @@ if REMOTE_PHOTO.is_file():
     # sys._MEIPASS/Resources/ - see ovb_rc003/resources.py's
     # find_remote_photo(), which checks that path first in a frozen build.
     datas.append((str(REMOTE_PHOTO), "Resources"))
+if QML_SOURCE_DIR.is_dir():
+    # XRBM-030: the settings window's own QML sources (main.qml/Tokens.qml/
+    # ConnectionPage.qml/ButtonsPage.qml/PermissionsPage.qml) are real files
+    # on disk, not a Python module - PyInstaller's Analysis never discovers
+    # them on its own, and no PySide6 hook bundles THIRD-PARTY qml/ trees
+    # (only Qt's OWN Quick Controls/QML plugin assets, handled automatically
+    # by PyInstaller's bundled PySide6 hooks). Collected under
+    # "ovb_rc003_qml" inside the COLLECT output, matching
+    # qt_settings_app.py's ``_qml_directory()``, which looks under
+    # ``sys._MEIPASS / "ovb_rc003_qml"`` in a frozen build - same
+    # sys._MEIPASS-relative reasoning as the photo above (see
+    # resources.py's module docstring).
+    datas.append((str(QML_SOURCE_DIR), "ovb_rc003_qml"))
+if VB_CABLE_BUNDLE_ZIP.is_file():
+    # Collected under "vb_cable_bundle" inside the COLLECT output, matching
+    # vb_cable_bundle.py's _candidate_bundle_paths(), which looks under
+    # sys._MEIPASS / "vb_cable_bundle" in a frozen build - same
+    # sys._MEIPASS-relative reasoning as the photo/qml entries above. A
+    # missing file here (e.g. a local `pyinstaller` invocation that skipped
+    # fetch-vb-cable.ps1) is not a spec-time error - build-candidate.ps1 and
+    # windows-rc003-ci.yml are what make fetching it a REQUIRED gate before
+    # this spec ever runs for a real candidate build; this spec itself stays
+    # defensive/optional, matching the existing photo/qml pattern above.
+    datas.append((str(VB_CABLE_BUNDLE_ZIP), "vb_cable_bundle"))
 
 hiddenimports = [
     "ovb_rc003.app",
     "ovb_rc003.settings_ui",
+    "ovb_rc003.qt_settings_app",  # XRBM-030
+    "ovb_rc003.windows_diagnostics",  # XRBM-031
+    "ovb_rc003.vb_cable_bundle",  # XRBM-031
     "ovb_rc003.ble_transport_winrt",
     "ovb_rc003.raw_input_windows",
     "ovb_rc003.audio_playback",
@@ -61,6 +97,18 @@ hiddenimports = [
     # then crashes on first real BLE discovery.
     "winrt.windows.foundation",
     "winrt.windows.foundation.collections",
+    # XRBM-030: qt_settings_app.py imports these lazily inside a function
+    # body (so importing the module itself never requires PySide6 - see its
+    # docstring), which PyInstaller's static import-graph analysis follows
+    # regardless of the surrounding try/except, but listed explicitly here
+    # too since QtQuickControls2/the FluentWinUI3 style module in
+    # particular is loaded through Qt's own plugin system rather than a
+    # plain Python import graph PyInstaller can always trace.
+    "PySide6.QtCore",
+    "PySide6.QtGui",
+    "PySide6.QtQml",
+    "PySide6.QtQuick",
+    "PySide6.QtQuickControls2",
 ]
 
 a = Analysis(

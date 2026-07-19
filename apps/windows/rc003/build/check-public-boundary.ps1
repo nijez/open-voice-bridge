@@ -105,7 +105,26 @@ $brandingCheckExemptRelativePaths = @(
     "tests/test_build_artifacts.py",
     "tests/test_boundary_scan_replay.py",
     "build/check-public-boundary.ps1",
-    "installer/readme-rc003.txt"
+    "installer/readme-rc003.txt",
+    # XRBM-031: the SOLE production-source exemption in this list, and only
+    # for the elevation category - src/ovb_rc003/vb_cable_bundle.py
+    # legitimately requests Windows' own "runas"/UAC verb to launch the
+    # THIRD-PARTY VB-CABLE vendor's own setup UI (never to elevate this
+    # application itself, and only from an explicit user click), which is
+    # otherwise forbidden everywhere else in this source tree. See
+    # tests/test_boundary_scan_replay.py's
+    # test_vb_cable_bundle_py_is_exempt_only_for_its_documented_elevation_reason
+    # and tests/test_privacy_contract.py's
+    # test_elevation_exception_is_scoped_to_the_vendor_vb_cable_launch_only,
+    # which both prove this file contains no branding/autostart violation and
+    # that the elevation reference is exactly the one disclosed vendor-launch
+    # call, not a self-elevation of this project's own process.
+    "src/ovb_rc003/vb_cable_bundle.py",
+    # README.md/ATTRIBUTION.md document this same disclosed "runas"/UAC
+    # vendor-launch mechanism in prose - the word itself is documentation,
+    # not a directive.
+    "README.md",
+    "ATTRIBUTION.md"
 )
 
 function Get-NormalizedRelativePath {

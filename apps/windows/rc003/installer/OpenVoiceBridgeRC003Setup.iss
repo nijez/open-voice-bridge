@@ -6,8 +6,19 @@
 ; Hard boundaries enforced by this script:
 ;   - PrivilegesRequired=lowest (no admin elevation requested, ever).
 ;   - No [Tasks]/[Icons] entry adds a login-autostart shortcut.
-;   - No VB-CABLE or any other driver package is installed, configured, or
-;     referenced. Voice output is chosen by the user inside the app itself.
+;   - This INSTALLER SCRIPT never installs, configures, silently modifies,
+;     or removes VB-CABLE or any other driver, and never elevates itself to
+;     do so, during install OR uninstall (XRBM-031 RETRY 1 item 5 - this
+;     comment previously and incorrectly claimed VB-CABLE was never
+;     referenced anywhere in this project at all). The application frozen
+;     under {#DistDir} (packaged wholesale by the [Files] entry below) DOES
+;     carry the official, unmodified VB-CABLE Basic package as opaque
+;     application data, and its OWN "检查与修复" settings page can
+;     optionally launch the vendor's original setup UI, gated behind its
+;     own in-app confirmation and a SEPARATE, real Windows UAC prompt -
+;     never this installer, never silently, and only after the app is
+;     already running and the user has explicitly clicked to do so. Voice
+;     output itself is still chosen by the user inside the app.
 ;   - No Frida binary is included (none is ever bundled - see
 ;     ovb_rc003/frida_compat.py).
 

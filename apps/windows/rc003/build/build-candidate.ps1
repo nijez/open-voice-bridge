@@ -60,6 +60,17 @@ try {
     & powershell -ExecutionPolicy Bypass -File (Join-Path "build" "check-public-boundary.ps1")
     Assert-LastExitCode "check-public-boundary.ps1"
 
+    # XRBM-031 In-scope item 8: fetch + hash-verify the official VB-CABLE
+    # base package BEFORE PyInstaller runs, so the frozen build deterministically
+    # bundles it (see build/OpenVoiceBridgeRC003.spec) and end users of the
+    # built candidate never need their own network access to install the
+    # optional driver. A download failure or hash mismatch here must fail
+    # this whole build closed, not silently produce a candidate with no
+    # bundled driver helper.
+    Write-Host "-- fetch + verify VB-CABLE driver pack --"
+    & powershell -ExecutionPolicy Bypass -File (Join-Path "build" "fetch-vb-cable.ps1")
+    Assert-LastExitCode "fetch-vb-cable.ps1"
+
     Write-Host "-- test suite --"
     $env:PYTHONPATH = Join-Path $RC003Root "src"
     & $venvPython -W error::ResourceWarning -m unittest discover -s tests -t . -p "test_*.py"

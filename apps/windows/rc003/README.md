@@ -117,7 +117,8 @@ prerelease，发布说明会写清楚它基于哪一次真实 Windows CI 运行�
 
 运行安装器：只安装到当前用户目录，不请求管理员权限，不设置开机自动启动，
 不安装任何驱动。安装完成后可以选择打开"设置"，但不会自动以无参数方式启动
-桥接——桥接模式需要在 Start Menu 中显式点击"启动"。安装器的 Start Menu
+桥接——桥接模式需要在 Start Menu 中显式点击"启动"，或在"设置"窗口里点击
+"保存并启动桥接"（见下方"首次使用"一节）。安装器的 Start Menu
 分组固定提供"设置""启动""停止""卸载"四个独立入口；主快捷方式与桌面快捷方式
 默认都打开"设置"，不会直接进入桥接模式。
 
@@ -152,6 +153,21 @@ Windows 默认输入/输出设备。如果要让语音识别/听写软件把 RC0
 两边选成同一个名字，或方向选反，都会让语音功能静默失败，但普通按键映射
 仍然正常工作。
 
+**一键随包安装（XRBM-031，可选）**：打开"设置 → 检查与修复"页，"可选：
+VB-CABLE 虚拟音频驱动"卡片会显示 CABLE Input/CABLE Output 两个端点当前是
+否已存在。如果还没安装，点击"安装/修复 VB-CABLE…"会先弹出一个说明对话框
+（VB-CABLE by VB-Audio，独立 Donationware，非 GPL 项目代码，可自愿捐赠/
+购买授权，仅随包提供基础版、不含付费的 A+B/C+D，安装会改变系统状态并需要
+重启），确认后才会解压随安装包携带的官方 `VBCABLE_Driver_Pack45.zip`（构建
+时已用固定的 SHA-256 校验过，未被本项目修改），并以 Windows 用户账户控制
+(UAC) 提示启动官方原始的 `VBCABLE_Setup_x64.exe`——本程序自身全程不以管理员
+身份运行，UAC 提示可以随时取消，取消不会安装任何内容。安装完成后需要重启
+电脑，重启后点击"重新检测"确认两个端点已出现，再点击同一页的"选择检测到
+的 CABLE Input 作为输出"即可把它设为语音输出端点（仍需要按方向手动把
+听写/识别软件的麦克风输入设为 `CABLE Output`）。这个入口只是把上面的手动
+下载步骤换成随包、离线、显式确认的流程，效果完全一致；仍然可以选择直接从
+<https://vb-audio.com/Cable/> 手动下载安装。
+
 ### 首次使用、停止/重启、卸载
 
 "打开设置并选择语音输出端点""确认按键映射""手动确认 Win+H"这几步在
@@ -163,8 +179,15 @@ Windows 默认输入/输出设备。如果要让语音识别/听写软件把 RC0
 
 1. 打开"设置"（Start Menu 中的"Open Voice Bridge · RC003"或
    "Open Voice Bridge · RC003 设置"），在"语音输出设备"下拉框中选择
-   上一节配置好的端点并保存；
-2. 从 Start Menu 选择"启动 Open Voice Bridge · RC003"启动桥接；
+   上一节配置好的端点；
+2. 启动桥接有两种等价方式：在设置窗口底部"桥接控制"区域点击"保存并
+   启动桥接"（会先用和"保存并应用"完全相同的校验保存设置，校验通过后
+   才启动，无参数桥接进程），或者关闭设置窗口后从 Start Menu 选择"启动
+   Open Voice Bridge · RC003"。"桥接控制"区域会显示以下四种状态之一：
+   未启动、已启动/运行中、已经在运行（检测到重复启动）、启动异常或
+   快速退出（附带真实退出码）——"运行中"只说明桥接进程本身存活，
+   **不代表已经与 RC003 建立连接**，实际连接、按键和语音状态仍以下一步
+   的日志为准；
 3. 按一下普通按键（例如方向键、确定键）确认按键映射生效；
 4. 在测试遥控器麦克风键之前，先手动确认 Win+H 语音听写本身能正常工作：
    打开记事本（或任意可编辑文本框），把光标点进文本区域，按一次键盘上的
@@ -179,8 +202,11 @@ Windows 默认输入/输出设备。如果要让语音识别/听写软件把 RC0
    解决那个问题，本程序不能让本来就不工作的系统听写变得可用；
 5. 需要时从 Start Menu 选择"停止 Open Voice Bridge · RC003"结束桥接，
    或从"设置 → 应用"/Start Menu 的"卸载"条目卸载（卸载会先自动停止
-   正在运行的进程，再删除安装时写入的程序文件）。**卸载不会自动删除
-   设置和日志**：`config.json`、`key_bindings.json` 和 `logs\app.log`
+   正在运行的进程，再删除安装时写入的程序文件）。遇到按键/语音/启动
+   问题时，可以在设置窗口点击"打开日志目录"直接定位到
+   `%LOCALAPPDATA%\OpenVoiceBridge\RC003\logs`；如果这台电脑上程序还
+   从未运行过，日志目录本身也不存在，该按钮会如实提示，而不是伪造一份
+   日志。**卸载不会自动删除设置和日志**：`config.json`、`key_bindings.json` 和 `logs\app.log`
    会一直保留在 `%LOCALAPPDATA%\OpenVoiceBridge\RC003` 下，因为
    安装脚本没有为这些运行期生成的文件配置卸载删除规则。如果这台
    电脑上不会再安装任何 RC003 版本（安装器或便携版）、也不需要
@@ -195,11 +221,13 @@ Windows 默认输入/输出设备。如果要让语音识别/听写软件把 RC0
 
 1. 打开 PowerShell，`cd` 到解压出的文件夹，运行
    `.\OpenVoiceBridgeRC003.exe --settings` 打开设置窗口，
-   在"语音输出设备"下拉框中选择上一节配置好的端点并保存，
-   然后关闭设置窗口；
-2. 在同一个文件夹里运行不带任何参数的
-   `.\OpenVoiceBridgeRC003.exe` 启动桥接（这会直接启动桥接进程本身，
-   不会再打开设置窗口）；
+   在"语音输出设备"下拉框中选择上一节配置好的端点；
+2. 启动桥接有两种等价方式：在设置窗口底部"桥接控制"区域点击"保存并
+   启动桥接"（先保存、校验通过后才启动）；或者关闭设置窗口，在同一个
+   文件夹里运行不带任何参数的 `.\OpenVoiceBridgeRC003.exe` 启动桥接
+   （这会直接启动桥接进程本身，不会再打开设置窗口）。"桥接控制"区域会
+   显示未启动、已启动/运行中、已经在运行、启动异常或快速退出四种状态之
+   一，"运行中"只说明进程本身存活，**不代表已经与 RC003 建立连接**；
 3. 按一下普通按键（例如方向键、确定键）确认按键映射生效；
 4. 手动确认 Win+H 语音听写的步骤和上面"安装器用户"一节完全相同（打开
    记事本、光标点进可编辑文本框、按 Win+H、确认联机语音识别已启用、
@@ -274,25 +302,179 @@ GPL-3.0 参考项目的只读、洁净室重新实现；设备配对/自动发�
   leaves Windows dictation running after the device stops; or a real hold
   (key-down on press, key-up on `AUDIO_STOP`) in hold mode. Cleanup/reset
   always closes out whichever action is still owed.
-- Ships a Tk settings window for button mapping, the voice hotkey/trigger
-  mode, and output-endpoint selection.
+- Ships a PySide6-Essentials + Qt Quick/QML settings window (XRBM-030,
+  replacing the earlier Tk candidate) with a four-page structure: the first
+  three pages - "连接"/"按键"/"权限" - match the macOS client's
+  `SettingsView.swift` structure and content system (corner radii, spacing,
+  semantic light/dark colors) - see below for a fourth "检查与修复" page
+  added in XRBM-031, which has no macOS counterpart. It shares
+  the same macOS-verified RC003 product-photo hotspot coordinates, while
+  keeping Windows' own title bar and a Qt Quick Controls "FluentWinUI3"
+  style for Windows 11 Fluent-language chrome (never the macOS red/yellow/
+  green traffic lights). The "按键" page's photo hotspots and its mapping
+  list are two views over the same row data (`ButtonMappingModel`, a
+  `QAbstractListModel`): clicking either one selects/highlights both. The
+  mic hotspot/row stays fixed and read-only - there is still no dedicated
+  physical mute key (see "Default button mapping" below). The "连接" page's
+  "保存并启动桥接" ("Save and start the bridge") button (XRBM-029) runs the
+  same validation as the plain save button, and only launches the
+  no-argument bridge process if that save succeeded; a "打开日志目录" ("Open
+  log directory") button (present on both the "连接" and "权限" pages) opens
+  the canonical `%LOCALAPPDATA%\OpenVoiceBridge\RC003\logs` directory,
+  honestly reporting when it does not exist yet rather than fabricating a
+  log. The "权限" page only ever offers to open the relevant Windows Settings
+  page (Bluetooth / microphone privacy / speech recognition) - it never
+  renders a fabricated "已授权" state, since Windows exposes no single API
+  this app can query for that the way macOS's TCC database does.
+  `bridge_launcher.py` builds the correct launch command for whichever
+  process shape is currently running (the frozen `.exe` itself with no
+  arguments, or the current Python interpreter with `-m ovb_rc003` from
+  source) and watches the child for a short grace period to distinguish
+  four states shown in the window: not started, started/still running,
+  already running (a duplicate launch the single-instance guard in
+  `single_instance.py` rejected, via its exact
+  `DUPLICATE_INSTANCE_EXIT_CODE`), and an abnormal/quick exit (any other
+  exit code, or the process never being created at all - both preserve the
+  real exit code/error text rather than swallowing it). The "started"
+  state is deliberately never described as "RC003 已连接"/"RC003
+  connected" - a live process is not evidence of an actual BLE/HID/audio
+  connection, which is only observable from `app.log`. Every piece of
+  validation/save/launch/log-status logic lives in plain, Qt-free functions
+  in `settings_ui.py` (unchanged by the Tk-to-Qt swap); `qt_settings_app.py`
+  only bridges them to QML via `SettingsController` (a `QObject`) and
+  `ButtonMappingModel`, both exposed to QML as singletons (see that
+  module's docstring for why not as root-context properties). Running
+  `python -m ovb_rc003 --settings` from source without PySide6-Essentials
+  installed raises a clear, actionable error instead of failing to import
+  or silently doing nothing; the packaged `.exe` always bundles its own Qt
+  runtime (see "Building an unsigned candidate" below), so end users of a
+  release build never need to separately install Python or Qt.
+- Adds a fourth "检查与修复" (check-and-repair) settings page (XRBM-031):
+  `windows_diagnostics.py` (Qt-free, no PySide6 import) runs a stable set of
+  checks - Windows version/64-bit architecture, exactly one paired RC003 BLE
+  candidate, exactly one matching Raw Input device (reported only as a
+  count, never a device path), whether VB-CABLE's `CABLE Input`/`CABLE
+  Output` endpoints exist, whether the saved output endpoint still resolves
+  and whether it is `CABLE Input`, and Windows dictation (Win+H), which is
+  always reported as `待手动验证` with concrete manual-test instructions,
+  never a fabricated pass - grouped into ordinary-button, RC003-voice-
+  bridge, dictation, and optional-driver sections so a live bridge process
+  or a paired device is never presented as proof that buttons or speech
+  actually work. `qt_settings_app.DiagnosticsController` runs every check on
+  a background Python thread (never the Qt GUI thread) and delivers the
+  result back via a cross-thread Qt signal; repeated "重新检测" clicks while
+  a check is already running are ignored rather than starting a second,
+  overlapping worker. The same page can select the uniquely detected `CABLE
+  Input` as the app's output (persisted only after that explicit click) and
+  can launch VB-CABLE's own official setup UI - see "VB-CABLE driver helper
+  (optional, XRBM-031)" below for that flow's own dedicated hash-gated
+  extraction/UAC-elevation contract.
 
 ## What this deliberately does NOT do
 
-- Does not auto-download, install, enable, or uninstall VB-CABLE or any
-  other audio driver.
-- Does not change the Windows default input or output device, ever.
+- Does not silently install, enable, or uninstall VB-CABLE or any other
+  audio driver - see "VB-CABLE driver helper (optional, XRBM-031)" below for
+  the one, explicit-user-click, UAC-gated exception this candidate does
+  implement, and exactly how narrow it is.
+- Does not change the Windows default input or output device, ever - not
+  even while installing/repairing VB-CABLE.
 - Does not persist or log a real Bluetooth address, HID device interface
   path/GUID, or device token (enforced in code - see `config.py`'s
   `FORBIDDEN_KEYS` guard, which is checked **recursively** through nested
-  dicts/lists, and `tests/test_privacy_contract.py`).
-- Does not request administrator elevation anywhere.
+  dicts/lists, and `tests/test_privacy_contract.py`); `windows_diagnostics.py`
+  reports the Raw Input/BLE checks as a count/status only, never a path or
+  name, for the same reason.
+- Does not request administrator elevation for its own application process,
+  anywhere, ever - `src/ovb_rc003/vb_cable_bundle.py` is the sole, disclosed
+  exception in this source tree (see `tests/test_privacy_contract.py`'s
+  `test_elevation_exception_is_scoped_to_the_vendor_vb_cable_launch_only`),
+  and it only ever requests UAC to launch the THIRD-PARTY vendor's own setup
+  UI, never to elevate this project's own process.
 - Does not enable start-on-login.
-- Does not bundle any third-party binary. The optional Frida Gadget fetch
-  script (`build/fetch-frida-gadget.ps1`) only ever pulls the official
-  release asset over HTTPS and verifies a pinned SHA-256 before use - and
-  even then, the actual injection step is intentionally unimplemented in
-  this candidate (see "Known gaps").
+- Does not use `pnputil`, silent/unattended install flags, scripted UI
+  click-automation, a UAC bypass, or a direct driver-store mutation anywhere
+  - VB-CABLE setup is always the vendor's own, unmodified, interactive
+    installer UI.
+- Does not remove or silently modify an already-installed VB-CABLE during
+  this application's own install/uninstall - the application installer never
+  touches it at all; only the diagnostics page's own explicit action can
+  reopen the vendor's setup UI for a vendor-controlled repair/removal.
+- Does not bundle any third-party EXECUTABLE binary directly in source
+  control. The optional Frida Gadget fetch script
+  (`build/fetch-frida-gadget.ps1`) only ever pulls the official release
+  asset over HTTPS and verifies a pinned SHA-256 before use - and even then,
+  the actual injection step is intentionally unimplemented in this candidate
+  (see "Known gaps"). `build/fetch-vb-cable.ps1` (XRBM-031) similarly fetches
+  and hash-verifies VB-Audio's own official VB-CABLE Basic package before a
+  real Windows build bundles it as opaque application data (see "VB-CABLE
+  driver helper" below) - never committed to Git either.
+
+## VB-CABLE driver helper (optional, XRBM-031)
+
+The "检查与修复" settings page can optionally help install VB-Audio's
+official [VB-CABLE](https://vb-audio.com/Cable/) Basic package
+(<https://www.vb-cable.com>, licensing terms at
+<https://vb-audio.com/Services/licensing.htm>) - an independent Donationware
+product, not GPL-3.0 project code - so a recognizer/listening app has a
+virtual microphone to read RC003 voice from. This is entirely optional:
+ordinary button mapping never needs it, and not installing it changes
+nothing else about this candidate.
+
+- **Build time**: `build/fetch-vb-cable.ps1` downloads the official
+  `VBCABLE_Driver_Pack45.zip` over HTTPS and verifies its SHA-256 against a
+  pin recorded in `src/ovb_rc003/vb_cable_bundle.py` - both
+  `build/build-candidate.ps1` and `.github/workflows/windows-rc003-ci.yml`
+  run this as a required step before PyInstaller, so a download failure or
+  hash mismatch fails the whole build closed. The verified, **unmodified**
+  ZIP is then bundled into the frozen build as opaque application data -
+  never committed to Git (`build/third_party/` is gitignored) - so the
+  installed/portable candidate can offer this option fully offline.
+- **Run time**: nothing happens automatically. Only when a user clicks
+  "安装/修复 VB-CABLE…" on the diagnostics page, confirms a second, explicit
+  in-app dialog (which states the Donationware/independent-license facts,
+  that only the Basic package is bundled - never the paid A+B/C+D - and that
+  installing changes the system and needs a reboot), does
+  `src/ovb_rc003/vb_cable_bundle.py` locate the bundled ZIP, **re-verify**
+  its SHA-256 (independently of the build-time check above), and reject the
+  extraction outright on a hash mismatch, a missing `VBCABLE_Setup_x64.exe`
+  member, or any unsafe ZIP member (an absolute path, a `..` traversal
+  segment, or a symlink) - the entire, unmodified archive is then extracted
+  into a freshly created, isolated temporary directory, and only the
+  official, unmodified `VBCABLE_Setup_x64.exe` is launched, with that
+  temporary directory as its working directory, via Windows' own `runas`/UAC
+  verb (`os.startfile(path, "runas", cwd=...)`) - a real elevation prompt the
+  user can cancel (reported honestly as a cancellation, not an error) at any
+  point. No silent-install flag, scripted click-through, UAC bypass,
+  `pnputil` call, PowerShell execution-policy bypass, or direct driver-store
+  write is ever used - this is exactly the vendor's own interactive
+  installer, the same one a user would get by manually downloading and
+  running it from VB-Audio's site.
+- **Never a fabricated success.** Launching the setup UI is never reported
+  as "installed" - only that the vendor UI was launched. VB-CABLE's own
+  installer requires a reboot; the only way this candidate confirms the
+  driver is actually present is the diagnostics page's own
+  `windows_diagnostics.check_vb_cable_endpoints()` recheck (via "重新检测")
+  finding both `CABLE Input`/`CABLE Output` endpoints afterward.
+- **Endpoint selection stays explicit.** The diagnostics page's "选择检测到
+  的 CABLE Input 作为输出" button re-enumerates real playback endpoints at
+  click time and persists the choice only if exactly one `CABLE Input`-named
+  endpoint currently exists (matching `CABLE Input` or a
+  `CABLE Input (<host API>)`-decorated name, never an unrelated
+  similarly-named device) - never auto-selected, and never on page load.
+- **The application's own installer/uninstaller are unaffected.** The main
+  Inno Setup installer stays `PrivilegesRequired=lowest`, never runs the
+  driver helper during install or uninstall, and never removes an
+  already-installed VB-CABLE when this application is uninstalled - only the
+  diagnostics page's own explicit action can reopen the vendor's setup UI
+  for a vendor-controlled repair/removal.
+- **Not yet exercised against a real Windows machine or a real VB-CABLE
+  install** (see "Known gaps"): the ZIP-safety logic is covered by tests
+  using synthetic, locally-constructed ZIP fixtures (never the real vendor
+  binary, which this macOS development environment cannot fetch/verify at
+  all - see the implementation report's validation section for exactly what
+  was and was not run here), and the `os.startfile(..., "runas", ...)` call
+  itself is Windows-only and has not been invoked for real anywhere in this
+  repository or its CI.
 
 ## Default button mapping
 
@@ -422,14 +604,31 @@ per-button mapping list.
   consistency with the documented signatures; it has never been run against
   the actual WinRT runtime or a real RC003, so exact behavior on first
   real-hardware use remains 待核验.
-- **Settings UI has no clickable photo hotspots.** The repository's RC003
-  product photo is shown for reference, but mapping is done via a text list,
-  not clickable regions on the image (see `settings_ui.py` docstring for
-  why). The repository root `README.md`'s clickable-photo mapping
-  screenshot (`docs/images/rc003-mapping-settings.jpg`) documents the
-  **macOS** app's settings UI only - this Windows candidate has no
-  equivalent screenshot of its own, and none should be assumed to exist
-  until one is actually captured from a real Windows build.
+- **Settings UI screenshot is an offscreen macOS render, not a real Windows
+  capture.** XRBM-030 replaced the earlier Tk text-list mapping view with a
+  Qt Quick/QML settings window that DOES now have clickable photo hotspots
+  at the same coordinates as the macOS app (see "What this does" above).
+  The screenshot referenced in this task's own (internal, not publicly
+  shipped) implementation report was produced via `QT_QPA_PLATFORM=offscreen`
+  on macOS (this project's actual development machine), using the real QML
+  files and a real rendered frame
+  - not a mockup - but it is still not the same as a screenshot taken from
+  a real Windows build with the "FluentWinUI3" Qt Quick Controls style
+  running natively; the repository root `README.md`'s clickable-photo
+  mapping screenshot (`docs/images/rc003-mapping-settings.jpg`) remains the
+  **macOS** app's own settings UI, unrelated to this one.
+- **The "检查与修复" page and VB-CABLE driver helper (XRBM-031) are not yet
+  verified on a real Windows machine or against the real vendor package.**
+  Every diagnostic check's PASS/FAIL/UNSUPPORTED branching, the ZIP-safety
+  logic (hash mismatch, traversal, symlink, missing setup member), and the
+  UAC-cancellation handling are covered by tests using synthetic fixtures and
+  injected fakes; `build/fetch-vb-cable.ps1` and the real `os.startfile(...,
+  "runas", ...)` call have not been exercised for real anywhere in this
+  repository or its CI (this development machine is macOS and cannot run
+  either). Real Windows CI, a real frozen build actually bundling the
+  fetched ZIP, and a real RC003 + VB-CABLE hardware retest all remain
+  outstanding next steps - see this candidate's own implementation report
+  for the exact commands run and their results.
 
 ## Running from source
 
@@ -450,6 +649,14 @@ Pair the RC003 in Windows Bluetooth settings before first use. No manual
 address entry is supported or needed - the app finds the paired device by
 name automatically, and fails closed if it finds none or more than one.
 
+`--settings` requires PySide6-Essentials (in `requirements.txt` above,
+XRBM-030) to actually open the Qt Quick/QML window; `--dry-run` and every
+other module import in this package never require it (see
+`qt_settings_app.py`'s module docstring). Running `--settings` from source
+without it installed raises a clear `QtUnavailableError` telling you to
+install `requirements.txt`, rather than crashing on an unrelated import
+error or silently doing nothing.
+
 ## Testing
 
 ```bash
@@ -463,8 +670,17 @@ voice-controller (including the toggle-taps-again-on-AUDIO_STOP and
 hold-releases-on-AUDIO_STOP lifecycle), audio-endpoint selection (including
 name+host-API disambiguation), config privacy (including nested dict/list
 guards) plus a stale-non-voice-`mic`-binding normalization check, the
-settings-save model (no Tk window constructed, including that a non-voice
-`mic` value can never be saved even if somehow supplied), the connection
+settings-save model (no Tk/Qt window constructed, including that a non-voice
+`mic` value can never be saved even if somehow supplied), the RC003 photo
+hotspot layout table and physical-button display strings (pure data, no Qt
+- `tests/test_remote_layout.py`), the external-Settings-page/log-directory
+open adapter used by the "权限" page (`tests/test_shell_targets.py`, no real
+OS shell call ever made), the `ButtonMappingModel`/`SettingsController` Qt
+adapters and an offscreen QML load of the real `main.qml` (skips with an
+explicit reason if PySide6-Essentials is not installed -
+`tests/test_qt_settings_app.py`), a static contract on the PyInstaller spec
+declaring the required Qt hiddenimports/qml `datas` collection
+(`tests/test_build_artifacts.py`), the connection
 supervisor's reconnect/cleanup contract (including a real cross-thread
 `request_reconnect()` call from an actual OS thread, and that a cleanup()
 failure ends `run_forever()` without a second `connect()`), app-level
@@ -484,9 +700,23 @@ injection-based startup-timeout test, the BLE transport's WinRT call-shape
 contract (via an in-memory fake projection, including the wrong-ID-domain
 rejection test and that an already-in-flight MIC_OPEN write is cancelled
 before GATT teardown, using a controllable blocking write rather than a
-timing-based sleep), the PowerShell boundary-scan replay, and
+timing-based sleep), the bridge-launch command construction and outcome
+detection (frozen-exe-no-args vs. source-`-m ovb_rc003`, and all four
+started/already-running/quick-exit/launch-failed outcomes, via an injected
+fake `Popen`/`sleep` so no real process is ever spawned and no real time is
+ever slept - XRBM-029), the canonical log-location helpers (directory/file
+present-or-missing detection never creates anything, and the "open log
+directory" call is exercised via an injected fake so no real OS file browser
+ever opens - XRBM-029), the PowerShell boundary-scan replay, and
 build-artifact/privacy-contract checks (including that the CI workflow's
-Inno Setup step is a required gate, not best-effort). The Windows-only
+Inno Setup step is a required gate, not best-effort), the "检查与修复"
+diagnostics checks (`tests/test_windows_diagnostics.py`, XRBM-031: every
+PASS/FAIL/MANUAL/UNSUPPORTED branch via injected fakes, never a real
+WinRT/PortAudio call in this test file itself), and the VB-CABLE driver
+helper's hash verification, safe-extraction (hash mismatch, absolute path,
+`..` traversal, symlink, missing setup member - via synthetic ZIP fixtures,
+never the real vendor binary), and UAC-cancellation handling
+(`tests/test_vb_cable_bundle.py`). The Windows-only
 tests under `tests/windows/` self-skip outside a real Windows environment
 with the optional runtime dependencies installed, and print an explicit
 skip reason rather than silently passing - what's left there is the
@@ -503,13 +733,28 @@ delivery.
 ```
 
 This creates a virtual environment, installs `requirements-dev.txt`, runs
-the public-boundary scan and test suite, invokes PyInstaller against
+the public-boundary scan, **fetches and hash-verifies the official VB-CABLE
+Basic package** (`build/fetch-vb-cable.ps1` - XRBM-031, a required step that
+fails the whole build closed on a download failure or hash mismatch), runs
+the test suite, invokes PyInstaller against
 `build/OpenVoiceBridgeRC003.spec`, then smoke-checks the built executable
 with `--dry-run` (imports every module, touches no GUI/BLE/HID/audio, exits
 0) - producing an **unsigned** one-dir build under
 `dist/OpenVoiceBridgeRC003/`. See `installer/OpenVoiceBridgeRC003Setup.iss`
 for the Inno Setup source (also unsigned; `PrivilegesRequired=lowest`, no
-autostart task, no driver install steps).
+autostart task, no driver install steps - the driver helper is only ever
+reached from inside the running application's own diagnostics page, never
+from the installer).
+
+The frozen build bundles its own Qt runtime (PySide6-Essentials' Qt
+libraries/plugins, collected automatically by PyInstaller's own PySide6
+hooks), this package's own `qml/` sources (collected explicitly by
+`build/OpenVoiceBridgeRC003.spec` under `ovb_rc003_qml/` - see the spec's
+comments), and the verified, unmodified VB-CABLE ZIP under
+`vb_cable_bundle/` (present only if `fetch-vb-cable.ps1` already ran) - end
+users of a built candidate never need to separately install Python, PySide6,
+Qt, or (should they choose to use the driver helper) even network access to
+fetch VB-CABLE themselves.
 
 `.github/workflows/windows-rc003-ci.yml` runs the same boundary scan, test
 suite, PyInstaller build, `--dry-run` smoke check, and Inno Setup compile

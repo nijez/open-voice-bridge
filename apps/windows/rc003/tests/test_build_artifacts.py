@@ -194,14 +194,32 @@ class PyInstallerSpecTests(unittest.TestCase):
         self.assertIn("bridges.t1", text)
         self.assertIn("bridges.hanvon", text)
 
-    def test_spec_does_not_reference_vbcable_or_frida_binary(self):
-        # Checked against the *effective* (non-comment) content: this file's
-        # header comment explains in prose that VB-CABLE/Frida binaries are
-        # excluded, which is intentional documentation, not a directive.
+    def test_spec_does_not_reference_frida_binary(self):
+        # Frida is still never bundled (see ovb_rc003.frida_compat) - only
+        # optionally fetched to a gitignored staging path by a separate,
+        # never-build-wired script. Checked against the *effective*
+        # (non-comment) content.
         text = _strip_hash_comments(_SPEC_PATH.read_text(encoding="utf-8")).lower()
-        self.assertNotIn("vbcable", text)
-        self.assertNotIn("vb-cable", text)
         self.assertNotIn(".dll.xz", text)
+        self.assertNotIn("frida", text)
+
+    def test_spec_bundles_the_verified_vb_cable_zip_as_data_not_a_binary_dependency(self):
+        # XRBM-031: unlike Frida, the pinned VB-CABLE base package IS now
+        # bundled - but only as opaque `datas` (an ordinary file PyInstaller
+        # copies verbatim), never as a `binaries`/hiddenimports entry that
+        # would imply this project links against or executes vendor code at
+        # build time. build/fetch-vb-cable.ps1 (a required gate in both
+        # build-candidate.ps1 and windows-rc003-ci.yml, run BEFORE this spec)
+        # is what actually places the verified file on disk; this spec stays
+        # defensive (only bundles it if present), matching the existing
+        # photo/qml datas entries.
+        text = _strip_hash_comments(_SPEC_PATH.read_text(encoding="utf-8"))
+        self.assertIn("VBCABLE_Driver_Pack45.zip", text)
+        self.assertIn('"vb_cable_bundle"', text)
+        self.assertIn("build", text)
+        self.assertIn("third_party", text)
+        self.assertIn('"ovb_rc003.vb_cable_bundle"', text)
+        self.assertIn('"ovb_rc003.windows_diagnostics"', text)
 
     def test_spec_analyzes_the_standalone_launcher_not_the_package_main(self):
         # XRBM-021: the spec's Analysis() entry script must be
@@ -279,9 +297,34 @@ class InnoSetupScriptTests(unittest.TestCase):
         self.assertNotIn("Tasks: \"startup\"", self.effective_text)
 
     def test_no_vbcable_reference(self):
+        # This installer SCRIPT's own directives never mention VB-CABLE at
+        # all (checked against the effective, comment-stripped text) - it
+        # never installs/configures/removes it, during install or
+        # uninstall. The header COMMENT block (not checked by this
+        # assertion) legitimately documents, in prose, that the bundled
+        # APPLICATION carries it as optional data - see
+        # test_header_comment_discloses_bundled_driver_helper_honestly
+        # below for that.
         lower = self.effective_text.lower()
         self.assertNotIn("vbcable", lower)
         self.assertNotIn("vb-cable", lower)
+
+    def test_header_comment_discloses_bundled_driver_helper_honestly(self):
+        # XRBM-031 RETRY 1 item 5: the header comment previously claimed
+        # "No VB-CABLE ... is installed, configured, or referenced" - false,
+        # since the frozen application it packages DOES bundle the official
+        # VB-CABLE package as data and can launch its setup UI from the
+        # diagnostics page. The corrected comment must instead state
+        # precisely what stays true (this installer script itself never
+        # runs/removes the driver, never elevates) without denying the
+        # bundled/launchable reality.
+        self.assertIn("vb-cable", self.text.lower())
+        self.assertIn("检查与修复", self.text)
+        self.assertIn("UAC", self.text)
+        self.assertNotIn(
+            "no vb-cable or any other driver package is installed, configured, or",
+            self.text.lower(),
+        )
 
     def test_install_dir_uses_open_voice_bridge_namespace(self):
         self.assertIn(r"{localappdata}\OpenVoiceBridge\{#AppFolder}", self.text)
@@ -834,6 +877,21 @@ class WindowsCiWorkflowTests(unittest.TestCase):
         self.assertIn("device attached", lower)
         self.assertIn("run the compiled installer", lower)
 
+    def test_fetches_and_verifies_vb_cable_before_pyinstaller_build(self):
+        # XRBM-031 In-scope item 8: a required gate, run BEFORE PyInstaller,
+        # so the frozen build deterministically bundles the verified ZIP.
+        self.assertIn("fetch-vb-cable.ps1", self.text)
+        fetch_index = self.text.index("fetch-vb-cable.ps1")
+        pyinstaller_index = self.text.index("PyInstaller build (unsigned candidate)")
+        self.assertLess(fetch_index, pyinstaller_index)
+
+    def test_vb_cable_fetch_step_is_a_required_gate_not_best_effort(self):
+        step_start = self.text.index("- name: Fetch and verify VB-CABLE driver pack")
+        next_step_start = self.text.index("- name:", step_start + 1)
+        step_text = self.text[step_start:next_step_start]
+        self.assertNotIn("continue-on-error", step_text)
+        self.assertIn("$LASTEXITCODE", step_text)
+
 
 class BuildCandidateScriptTests(unittest.TestCase):
     def setUp(self):
@@ -844,6 +902,55 @@ class BuildCandidateScriptTests(unittest.TestCase):
         # must enforce the same -W error::ResourceWarning policy as the CI
         # workflow's test-suite step, not just document it in prose.
         self.assertIn("-W error::ResourceWarning -m unittest discover", self.text)
+
+    def test_fetches_and_verifies_vb_cable_before_pyinstaller_build(self):
+        # XRBM-031 In-scope item 8: same ordering requirement as the CI
+        # workflow (see WindowsCiWorkflowTests above) for the local build.
+        self.assertIn("fetch-vb-cable.ps1", self.text)
+        fetch_index = self.text.index("fetch-vb-cable.ps1")
+        pyinstaller_index = self.text.index("PyInstaller build (unsigned candidate)")
+        self.assertLess(fetch_index, pyinstaller_index)
+        assert_index = self.text.index('Assert-LastExitCode "fetch-vb-cable.ps1"')
+        self.assertGreater(assert_index, fetch_index)
+
+
+class VbCablePinConsistencyTests(unittest.TestCase):
+    """XRBM-031: the URL/SHA-256 pin must agree, character for character,
+    across every place it is duplicated - the build-time fetch script
+    (PowerShell) and the runtime verification module (Python) - so a future
+    edit to one can never silently drift from the other the way the Frida
+    Gadget pin's own two copies (fetch-frida-gadget.ps1 / frida_compat.py)
+    already established as this project's precedent for this exact
+    duplication pattern.
+    """
+
+    def setUp(self):
+        self.fetch_script_text = (
+            _RC003_ROOT / "build" / "fetch-vb-cable.ps1"
+        ).read_text(encoding="utf-8")
+        self.module_text = (
+            _RC003_ROOT / "src" / "ovb_rc003" / "vb_cable_bundle.py"
+        ).read_text(encoding="utf-8")
+
+    def test_pinned_sha256_matches_between_ps1_and_py(self):
+        from ovb_rc003 import vb_cable_bundle
+
+        self.assertIn(
+            vb_cable_bundle.VB_CABLE_PACK45.sha256.upper(), self.fetch_script_text
+        )
+
+    def test_pinned_url_matches_between_ps1_and_py(self):
+        from ovb_rc003 import vb_cable_bundle
+
+        self.assertIn(vb_cable_bundle.VB_CABLE_PACK45.url, self.fetch_script_text)
+        self.assertIn(vb_cable_bundle.VB_CABLE_PACK45.url, self.module_text)
+
+    def test_fetch_script_writes_to_gitignored_third_party_directory(self):
+        self.assertIn("third_party", self.fetch_script_text)
+
+    def test_fetch_script_fails_closed_on_hash_mismatch(self):
+        self.assertIn("SHA-256 mismatch", self.fetch_script_text)
+        self.assertIn("throw", self.fetch_script_text)
 
 
 class UserFacingDocumentationContractTests(unittest.TestCase):
@@ -952,19 +1059,40 @@ class RootDocumentConsistencyTests(unittest.TestCase):
         # THIRD_PARTY_NOTICES.md previously claimed the Windows candidate
         # does not "reference VB-CABLE ... in any form" - false:
         # apps/windows/rc003/README.md and installer/readme-rc003.txt both
-        # document the official VB-Audio VB-CABLE download as an optional,
-        # user-installed endpoint. The accurate claim is narrower: not
-        # bundled/installed/configured/licensed/redistributed BY this
-        # project, and the runtime only ever writes to an explicitly
-        # user-selected endpoint - documentation mentioning the official
-        # download as an option is not a contradiction of that.
+        # document the official VB-Audio VB-CABLE download as an optional
+        # endpoint, and (XRBM-031) the frozen build now bundles the
+        # official, verified, unmodified Basic package offline for a
+        # user-initiated, UAC-gated install. The accurate claim: not
+        # modified/re-licensed/silently installed by this project, and the
+        # runtime only ever writes to an explicitly user-selected endpoint.
         self.assertNotIn(
             "does not download, install, configure, or reference VB-CABLE",
             self.notices_text,
         )
-        self.assertIn("does not bundle, download, install, configure, license, or redistribute VB-CABLE", self.notices_text)
-        self.assertIn("optional, user-installed", self.notices_text)
+        self.assertNotIn(
+            "does not bundle, download, install, configure, license, or redistribute VB-CABLE",
+            self.notices_text,
+        )
+        self.assertIn("Donationware", self.notices_text)
         self.assertIn("explicitly selected", self.notices_text)
+
+    def test_third_party_notices_discloses_the_bundled_vb_cable_flow_honestly(self):
+        # XRBM-031: the notice must disclose that the official Basic package
+        # is now bundled/fetched (not merely mentioned as a link), that only
+        # the free Basic package (never paid A+B/C+D) is involved, that
+        # installation only happens via an explicit user click plus a real
+        # UAC prompt, and that this project's own process never runs
+        # elevated and never reports install success from launch alone.
+        self.assertIn("fetch-vb-cable.ps1", self.notices_text)
+        self.assertIn("VBCABLE_Driver_Pack45.zip", self.notices_text)
+        self.assertIn("A+B/C+D", self.notices_text)
+        self.assertIn("UAC", self.notices_text)
+        self.assertIn("never runs with administrator privileges", self.notices_text)
+        self.assertIn(
+            "never reports a driver install as successful merely because a process was launched",
+            self.notices_text,
+        )
+        self.assertIn("never changes the Windows system default input/output device", self.notices_text)
 
     def test_root_readme_and_windows_readme_agree_rc003_windows_is_a_candidate(self):
         # Cross-file consistency: both docs must describe the RC003 Windows
@@ -1325,6 +1453,73 @@ class WindowsPrereleaseAssetScopeContractTests(unittest.TestCase):
     def test_asset_count_claim_is_scoped_to_the_windows_candidate(self):
         self.assertIn("每个 RC003 Windows 候选预发行版恰好包含以下三个文件", self.text)
         self.assertNotIn("每个预发行版恰好包含以下三个文件", self.text)
+
+
+def _spec_hidden_imports(text: str) -> list:
+    tree = ast.parse(text, filename=str(_SPEC_PATH))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "hiddenimports"
+            for target in node.targets
+        ):
+            return ast.literal_eval(node.value)
+    raise AssertionError("hiddenimports assignment not found in spec")
+
+
+class QtSettingsUiSpecTests(unittest.TestCase):
+    """XRBM-030: static contract that the PyInstaller spec actually bundles
+    the Qt Quick/QML settings window's own qml/ sources (never covered by
+    any PySide6 hook, which only auto-collects Qt's OWN Quick Controls/QML
+    plugin assets - see the spec's own comment) and hidden-imports every
+    PySide6 submodule qt_settings_app.py needs - a real Windows CI
+    PyInstaller build remains the platform-level confirmation on top of
+    this structural one.
+    """
+
+    def setUp(self):
+        self.spec_text = _SPEC_PATH.read_text(encoding="utf-8")
+        self.requirements_text = _REQUIREMENTS_PATH.read_text(encoding="utf-8")
+
+    def test_requirements_pins_pyside6_essentials(self):
+        self.assertIn("PySide6-Essentials==", self.requirements_text)
+        # Never an actual PySide6-Addons *pin* - checked against effective
+        # (non-comment) content, since requirements.txt's own comment
+        # legitimately explains in prose why Addons is excluded.
+        self.assertNotIn(
+            "PySide6-Addons", _strip_hash_comments(self.requirements_text)
+        )
+
+    def test_spec_collects_the_qml_source_tree_as_data_under_the_expected_name(self):
+        # Must match qt_settings_app.py's _qml_directory() frozen-build
+        # lookup path exactly: sys._MEIPASS / "ovb_rc003_qml".
+        self.assertIn('QML_SOURCE_DIR = SRC_ROOT / "ovb_rc003" / "qml"', self.spec_text)
+        self.assertIn('datas.append((str(QML_SOURCE_DIR), "ovb_rc003_qml"))', self.spec_text)
+
+    def test_spec_hidden_imports_every_pyside6_submodule_qt_settings_app_uses(self):
+        hiddenimports = _spec_hidden_imports(self.spec_text)
+        for module in (
+            "PySide6.QtCore",
+            "PySide6.QtGui",
+            "PySide6.QtQml",
+            "PySide6.QtQuick",
+            "PySide6.QtQuickControls2",
+            "ovb_rc003.qt_settings_app",
+        ):
+            self.assertIn(module, hiddenimports)
+
+    def test_qml_directory_name_matches_qt_settings_app_frozen_lookup(self):
+        # Cross-file consistency: the exact "ovb_rc003_qml" folder name must
+        # agree between the spec (producer) and qt_settings_app.py's
+        # _qml_directory() (consumer) - a silent rename on either side would
+        # otherwise pass every other test here and only fail at runtime on a
+        # real frozen build, the same class of bug XRBM-024's WinRT
+        # dependency-closure tests above guard against.
+        qt_settings_app_path = (
+            _RC003_ROOT / "src" / "ovb_rc003" / "qt_settings_app.py"
+        )
+        qt_settings_app_text = qt_settings_app_path.read_text(encoding="utf-8")
+        self.assertIn('"ovb_rc003_qml"', self.spec_text)
+        self.assertIn('"ovb_rc003_qml"', qt_settings_app_text)
 
 
 if __name__ == "__main__":

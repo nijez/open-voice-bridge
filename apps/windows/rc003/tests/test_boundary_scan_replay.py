@@ -46,13 +46,30 @@ _ELEVATION_MARKERS = (
 _AUTOSTART_MARKERS = ("CurrentVersion\\Run", "userstartup")
 
 # Mirrors $brandingCheckExemptRelativePaths in check-public-boundary.ps1
-# exactly - keep both lists in sync.
+# exactly - keep both lists in sync. One shared list gates all three
+# categories (branding/elevation/autostart) together, matching the PS1
+# script's own single `$isExempt` flag. XRBM-031 adds
+# src/ovb_rc003/vb_cable_bundle.py: it legitimately requests Windows' own
+# "runas"/UAC verb to launch the THIRD-PARTY VB-CABLE vendor's setup UI -
+# and only that, only from an explicit user click - which is otherwise
+# forbidden everywhere else in this source tree (see
+# test_vb_cable_bundle_py_is_exempt_only_for_its_documented_elevation_reason
+# below, which proves this exemption is not a blank check).
 _BRANDING_CHECK_EXEMPT_RELATIVE_PATHS = {
     Path("tests/test_privacy_contract.py"),
     Path("tests/test_build_artifacts.py"),
     Path("tests/test_boundary_scan_replay.py"),
     Path("build/check-public-boundary.ps1"),
     Path("installer/readme-rc003.txt"),
+    Path("src/ovb_rc003/vb_cable_bundle.py"),
+    # XRBM-031: README.md/ATTRIBUTION.md document the same disclosed
+    # "runas"/UAC vendor-launch mechanism in prose (see README.md's
+    # "VB-CABLE driver helper" section and ATTRIBUTION.md's
+    # qt_settings_app.py/vb_cable_bundle.py rows) - the word itself is
+    # documentation, not a directive, matching installer/readme-rc003.txt's
+    # own precedent above.
+    Path("README.md"),
+    Path("ATTRIBUTION.md"),
 }
 
 _COMMENT_PREFIX_BY_EXTENSION = {".ps1": "#", ".iss": ";"}
@@ -128,21 +145,49 @@ class BoundaryScanReplayTests(unittest.TestCase):
         # exemption (and, for .ps1/.iss, comment-stripping), these files
         # would self-match because they legitimately contain the
         # forbidden-term string literals that define what to scan for, a
-        # negative-test fixture, a documented exclusion statement, or an
-        # explanatory comment.
+        # negative-test fixture, a documented exclusion statement, an
+        # explanatory comment, or (XRBM-031, vb_cable_bundle.py only) the
+        # one disclosed, scoped elevation verb this project actually uses.
         for relative in _BRANDING_CHECK_EXEMPT_RELATIVE_PATHS:
             path = _RC003_ROOT / relative
             self.assertTrue(path.is_file(), f"expected exempt file missing: {path}")
             text = path.read_text(encoding="utf-8")
-            contains_a_forbidden_term = any(
-                pattern.search(text) for pattern in _FORBIDDEN_BRANDING_PATTERNS
-            ) or any(marker in text for marker in _AUTOSTART_MARKERS)
+            contains_a_forbidden_term = (
+                any(pattern.search(text) for pattern in _FORBIDDEN_BRANDING_PATTERNS)
+                or any(marker in text for marker in _AUTOSTART_MARKERS)
+                or any(marker in text for marker in _ELEVATION_MARKERS)
+            )
             self.assertTrue(
                 contains_a_forbidden_term,
                 f"{relative} was expected to legitimately reference a forbidden term "
                 "(as a scanner pattern, fixture, exclusion statement, or comment) - if "
                 "it no longer does, it may not need to stay in the exemption list",
             )
+
+    def test_vb_cable_bundle_py_is_exempt_only_for_its_documented_elevation_reason(self):
+        # Proves the new exemption is scoped, not a blank check: the file
+        # must reference the elevation verb (or the exemption is dead
+        # weight), and must never contain a forbidden BRANDING or AUTOSTART
+        # term - only elevation is the reason it needed to be added here.
+        path = _RC003_ROOT / "src" / "ovb_rc003" / "vb_cable_bundle.py"
+        text = path.read_text(encoding="utf-8")
+        self.assertTrue(any(marker in text for marker in _ELEVATION_MARKERS))
+        self.assertFalse(any(pattern.search(text) for pattern in _FORBIDDEN_BRANDING_PATTERNS))
+        self.assertFalse(any(marker in text for marker in _AUTOSTART_MARKERS))
+
+    def test_readme_is_exempt_only_for_its_documented_elevation_reason(self):
+        path = _RC003_ROOT / "README.md"
+        text = path.read_text(encoding="utf-8")
+        self.assertTrue(any(marker in text for marker in _ELEVATION_MARKERS))
+        self.assertFalse(any(pattern.search(text) for pattern in _FORBIDDEN_BRANDING_PATTERNS))
+        self.assertFalse(any(marker in text for marker in _AUTOSTART_MARKERS))
+
+    def test_attribution_is_exempt_only_for_its_documented_elevation_reason(self):
+        path = _RC003_ROOT / "ATTRIBUTION.md"
+        text = path.read_text(encoding="utf-8")
+        self.assertTrue(any(marker in text for marker in _ELEVATION_MARKERS))
+        self.assertFalse(any(pattern.search(text) for pattern in _FORBIDDEN_BRANDING_PATTERNS))
+        self.assertFalse(any(marker in text for marker in _AUTOSTART_MARKERS))
 
     def test_mac_placeholder_alone_does_not_violate(self):
         # test_config.py intentionally contains the standard placeholder as
