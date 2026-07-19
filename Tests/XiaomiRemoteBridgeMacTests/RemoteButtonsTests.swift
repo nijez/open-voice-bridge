@@ -114,4 +114,42 @@ struct RemoteButtonsTests {
         #expect(RemoteButton.volumeUp.nativeEvent == .systemKey(type: 0))
         #expect(RemoteButton.back.nativeEvent == nil)
     }
+
+    @Test func mouseRightClickActionHasStableRawValueAndDisplayName() {
+        #expect(ButtonAction.mouseRightClick.rawValue == "mouseRightClick")
+        #expect(ButtonAction.mouseRightClick.displayName == "鼠标右键（当前位置）")
+        #expect(ButtonAction.allCases.contains(.mouseRightClick))
+    }
+
+    @Test func clarifiedActionsKeepRawValuesWhileRenamingDisplay() {
+        #expect(ButtonAction.contextMenu.rawValue == "contextMenu")
+        #expect(ButtonAction.contextMenu.displayName == "上下文菜单（Shift-F10）")
+        #expect(ButtonAction.appSwitcher.rawValue == "appSwitcher")
+        #expect(ButtonAction.appSwitcher.displayName == "切换应用（Command-Tab）")
+    }
+
+    @Test func menuDefaultBindingStaysContextMenu() {
+        #expect(AppSettings.defaultBindings[.menu] == .contextMenu)
+        #expect(AppSettings.defaultBindings[.tv] == .appSwitcher)
+    }
+
+    @Test func legacyActionJSONStillDecodesToSameActions() throws {
+        let json = Data(#"{"menu":"contextMenu","tv":"appSwitcher"}"#.utf8)
+        let decoded = try JSONDecoder().decode([String: ButtonAction].self, from: json)
+        #expect(decoded["menu"] == .contextMenu)
+        #expect(decoded["tv"] == .appSwitcher)
+    }
+
+    @Test func mouseRightClickBindingPersistsAndReloads() throws {
+        let suiteName = "XiaomiRemoteBridgeMacTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let saved = try JSONEncoder().encode([RemoteButton.menu.rawValue: ButtonAction.mouseRightClick])
+        defaults.set(saved, forKey: "buttonBindings")
+        let settings = AppSettings(defaults: defaults)
+
+        #expect(settings.action(for: .menu) == .mouseRightClick)
+        #expect(settings.action(for: .tv) == .appSwitcher)
+    }
 }

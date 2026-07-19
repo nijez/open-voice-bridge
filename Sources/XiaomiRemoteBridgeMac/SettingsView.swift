@@ -33,6 +33,29 @@ struct SettingsView: View {
                 Button("立即重新连接") { model.reconnect() }
             }
 
+            Section(header: Text("桥接开关（双击语音键）")) {
+                statusRow("桥接状态", value: model.bridgeRuntimeStatus)
+                HStack {
+                    Button(model.bridgeEnabled ? "停用桥接" : "启用桥接") {
+                        model.toggleBridgeEnabled(source: "settings")
+                    }
+                    Spacer()
+                }
+                Toggle("快速双击语音键切换桥接启用/停用", isOn: Binding(
+                    get: { settings.doubleClickToggleEnabled },
+                    set: { model.setDoubleClickToggleEnabled($0) }
+                ))
+                Text(
+                    "快速双击遥控器语音键（两次完整短按，默认 350ms 内、每次不超过 250ms）可在“桥接已启用/已停用”之间切换一次。" +
+                    "停用后 RC003 不再向 Mac 注入普通按键、Fn/🌐︎、语音或音频；再次双击或点上方按钮即可恢复。" +
+                    "长按语音（按住说话）不受影响、也不增加任何等待延迟。" +
+                    "运行时状态不持久化：退出并重开应用会自动恢复为“已启用”。" +
+                    "若关闭了上面的“自定义按键映射”或系统不允许独占读取，停用时遥控器的普通按键可能仍走 macOS 原生行为，状态栏会如实提示。"
+                )
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+            }
+
             Section(header: Text("虚拟麦克风")) {
                 Picker("语音输出", selection: Binding(
                     get: { settings.selectedAudioDeviceUID },
@@ -76,6 +99,36 @@ struct SettingsView: View {
                     .font(.footnote)
                     .foregroundColor(.secondary)
             }
+
+            Section(header: Text("兼容 Mac 键盘 Fn")) {
+                Toggle("按住物理 Fn 时使用本机麦克风", isOn: Binding(
+                    get: { settings.localFnMicEnabled },
+                    set: { model.setLocalFnMicEnabled($0) }
+                ))
+                Picker("本机输入源", selection: Binding(
+                    get: { settings.localMicInputUID },
+                    set: { model.setLocalMicInput($0) }
+                )) {
+                    Text("系统默认输入").tag("")
+                    ForEach(model.audioInputDevices) { device in
+                        Text(device.name).tag(device.uid)
+                    }
+                }
+                .disabled(!settings.localFnMicEnabled)
+                statusRow("兼容状态", value: model.localMicStatus)
+                statusRow("麦克风权限", value: model.microphonePermission.statusText)
+                Text(
+                    "默认关闭。只有开启后、按住 Mac 内置键盘的物理 Fn、且 RC003 未在说话时，" +
+                    "才会把本机麦克风转发到上面所选的语音输出（如 BlackHole）。松开 Fn 立即停止；" +
+                    "RC003 语音始终优先。不录音、不上传，不修改系统默认音频。"
+                )
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .onAppear {
+            model.refreshAudioDevices()
+            model.refreshMicrophonePermission()
         }
     }
 
@@ -181,7 +234,7 @@ struct SettingsView: View {
                 }
             }
             .labelsHidden()
-            .frame(width: 175)
+            .frame(width: 208)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
@@ -224,6 +277,12 @@ struct SettingsView: View {
                     detail: "把映射后的按键动作发送给当前应用",
                     actionTitle: "请求权限"
                 ) { model.requestAccessibilityPermission() }
+                permissionRow(
+                    title: "麦克风（本机 Fn 兼容）",
+                    detail: "仅在开启“兼容 Mac 键盘 Fn”并按住物理 Fn 时采集本机麦克风；当前：" +
+                        model.microphonePermission.statusText,
+                    actionTitle: model.microphonePermission == .authorized ? "已授权" : "请求权限"
+                ) { model.requestMicrophonePermission() }
             }
 
             Section(header: Text("诊断")) {

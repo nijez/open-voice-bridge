@@ -39,6 +39,13 @@ enum RemoteVoiceFunctionMappingPolicy {
         destination: 0x0000_00FF_0000_0003
     )
 
+    // The raw keyboard usage (0x3e) that the RC003 microphone button reports in
+    // its HID input report — the low 16 bits of `remoteVoiceKey.source`. Reading
+    // this edge directly from the RC003 device is the reliable "remote source"
+    // pre-marker that gates the local microphone, independent of the ATVV BLE
+    // timing and independent of `customMappingEnabled`.
+    static let remoteVoiceKeyUsage: UInt16 = 0x003E
+
     static func applying(to existing: [HIDUsageMapping]) -> [HIDUsageMapping] {
         existing.filter { $0.source != remoteVoiceKey.source } + [remoteVoiceKey]
     }
@@ -98,20 +105,29 @@ final class RemoteVoiceFunctionMapper {
         return isApplied
     }
 
-    func restore() {
+    /// Restores the original F5 system mapping for every present target service.
+    /// Returns `true` when the restore is clean — either there was nothing applied,
+    /// or every present target service that had a saved original was restored
+    /// successfully. Returns `false` when a present target service could not be
+    /// restored (its F5 may still be remapped to Fn), so the caller can stay in a
+    /// failed-disabled state and surface an understandable error.
+    @discardableResult
+    func restore() -> Bool {
         guard !originalMappings.isEmpty else {
             isApplied = false
-            return
+            return true
         }
 
         let client = IOHIDEventSystemClientCreateSimpleClient(kCFAllocatorDefault)
         let services = IOHIDEventSystemClientCopyServices(client) as? [IOHIDServiceClient] ?? []
+        var attemptedCount = 0
         var restoredCount = 0
 
         for service in services where Self.isTarget(service) {
             guard let registryID = Self.registryID(service),
                   let original = originalMappings[registryID]
             else { continue }
+            attemptedCount += 1
             let restored = RemoteVoiceFunctionMappingPolicy.restoring(
                 originalVoiceMapping: original.mapping,
                 in: Self.readMappings(service)
@@ -128,6 +144,10 @@ final class RemoteVoiceFunctionMapper {
         originalMappings.removeAll()
         isApplied = false
         AppLogger.shared.write("VOICE FN MAPPING restored=\(restoredCount)")
+        // Clean when no present target service failed to restore. A device that is
+        // absent (attempted == 0) is also clean: its service — and any mapping on
+        // it — is gone until it reconnects, at which point apply/restore run afresh.
+        return restoredCount == attemptedCount
     }
 
     private static func isTarget(_ service: IOHIDServiceClient) -> Bool {

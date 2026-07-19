@@ -111,6 +111,7 @@ enum ButtonAction: String, CaseIterable, Codable, Identifiable {
     case showDesktop
     case contextMenu
     case appSwitcher
+    case mouseRightClick
     case volumeUp
     case volumeDown
     case volumeMute
@@ -129,8 +130,9 @@ enum ButtonAction: String, CaseIterable, Codable, Identifiable {
         case .arrowRight: return "方向右"
         case .deleteBackward: return "Delete（退格）"
         case .showDesktop: return "显示桌面"
-        case .contextMenu: return "Shift-F10"
-        case .appSwitcher: return "Command-Tab"
+        case .contextMenu: return "上下文菜单（Shift-F10）"
+        case .appSwitcher: return "切换应用（Command-Tab）"
+        case .mouseRightClick: return "鼠标右键（当前位置）"
         case .volumeUp: return "系统音量 +"
         case .volumeDown: return "系统音量 -"
         case .volumeMute: return "系统静音"

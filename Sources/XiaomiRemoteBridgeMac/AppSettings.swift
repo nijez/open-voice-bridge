@@ -9,6 +9,9 @@ final class AppSettings: ObservableObject {
         static let legacyExclusiveHID = "exclusiveHID"
         static let buttonBindings = "buttonBindings"
         static let peripheralIdentifier = "peripheralIdentifier"
+        static let localFnMicEnabled = "localFnMicEnabled"
+        static let localMicInputUID = "localMicInputUID"
+        static let doubleClickToggleEnabled = "doubleClickToggleEnabled"
     }
 
     private let defaults: UserDefaults
@@ -23,6 +26,26 @@ final class AppSettings: ObservableObject {
 
     @Published var customMappingEnabled: Bool {
         didSet { defaults.set(customMappingEnabled, forKey: Keys.customMappingEnabled) }
+    }
+
+    /// Off by default: the Mac built-in microphone is never requested or captured
+    /// until the user explicitly turns this on.
+    @Published var localFnMicEnabled: Bool {
+        didSet { defaults.set(localFnMicEnabled, forKey: Keys.localFnMicEnabled) }
+    }
+
+    /// Empty string means "follow the system default input device".
+    @Published var localMicInputUID: String {
+        didSet { defaults.set(localMicInputUID, forKey: Keys.localMicInputUID) }
+    }
+
+    /// Whether the RC003 voice-key double-click toggles the bridge runtime on/off.
+    /// On by default; this only governs gesture recognition. The runtime
+    /// enabled/disabled state itself is intentionally NOT persisted (the app
+    /// always starts enabled), and the explicit Settings/menu button works even
+    /// when this is off.
+    @Published var doubleClickToggleEnabled: Bool {
+        didSet { defaults.set(doubleClickToggleEnabled, forKey: Keys.doubleClickToggleEnabled) }
     }
 
     @Published var buttonBindings: [RemoteButton: ButtonAction] {
@@ -50,6 +73,11 @@ final class AppSettings: ObservableObject {
         } else {
             customMappingEnabled = defaults.bool(forKey: Keys.legacyExclusiveHID)
         }
+        localFnMicEnabled = defaults.bool(forKey: Keys.localFnMicEnabled)
+        localMicInputUID = defaults.string(forKey: Keys.localMicInputUID) ?? ""
+        doubleClickToggleEnabled = defaults.object(forKey: Keys.doubleClickToggleEnabled) == nil
+            ? true
+            : defaults.bool(forKey: Keys.doubleClickToggleEnabled)
 
         if
             let data = defaults.data(forKey: Keys.buttonBindings),

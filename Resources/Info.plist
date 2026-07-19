@@ -26,6 +26,8 @@
     <true/>
     <key>NSBluetoothAlwaysUsageDescription</key>
     <string>连接小米蓝牙遥控器 2 Pro，接收按键与语音数据。</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>仅在你开启“兼容 Mac 键盘 Fn”并按住物理 Fn 键时，采集本机麦克风并转发到你选择的语音输出设备；松开即停止，不录音、不上传。</string>
     <key>NSHumanReadableCopyright</key>
     <string>GPL-3.0-only</string>
     <key>NSPrincipalClass</key>
