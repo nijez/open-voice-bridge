@@ -859,6 +859,20 @@ result = {
     "width": root_objects[0].property("width") if root_objects else None,
     "height": root_objects[0].property("height") if root_objects else None,
 }
+
+# XRBM-033: explicit, deterministic teardown (root objects/items, then the
+# engine, then the singleton instances it referenced) BEFORE this script
+# ends - see qt_settings_app.py module docstring's "Real-QML-object-vs-
+# cache-release ordering" section for why this is what makes this real
+# QML-engine-loading probe's own process exit safe.
+del root_objects
+del engine
+del diagnostics_controller
+del controller
+del model
+import gc
+gc.collect()
+
 print(json.dumps(result))
 """
 
@@ -1034,6 +1048,19 @@ QTest.mouseClick(window, Qt.LeftButton, Qt.NoModifier, save_center)
 app.processEvents()
 
 assert controller.errorMessage == "", f"save reported a validation error: {controller.errorMessage}"
+
+# XRBM-033: explicit, deterministic teardown (every QML item/window
+# reference first, then the engine, then the singleton instances it
+# referenced) BEFORE this script ends - see qt_settings_app.py module
+# docstring's "Real-QML-object-vs-cache-release ordering" section.
+del save_button, combo, mapping_list, tab_bar, window
+del engine
+del diagnostics_controller
+del controller
+del model
+import gc
+gc.collect()
+
 print("OK")
 """
 
@@ -1179,6 +1206,18 @@ for object_name in ("connectionTabButton", "openLogButton", "hotkeyField"):
             if luminance < darkest:
                 darkest = luminance
     results[object_name] = {"background": background_luminance, "darkest": darkest}
+
+# XRBM-033: explicit, deterministic teardown (every QML item/window/image
+# reference first, then the engine, then the singleton instances it
+# referenced) BEFORE this script ends - see qt_settings_app.py module
+# docstring's "Real-QML-object-vs-cache-release ordering" section.
+del item, image, window
+del engine
+del diagnostics_controller
+del controller
+del model
+import gc
+gc.collect()
 
 print(json.dumps(results))
 """
@@ -1375,6 +1414,19 @@ results_out = {
     "painted_w": painted_w,
     "painted_h": painted_h,
 }
+
+# XRBM-033: explicit, deterministic teardown (every QML item/window
+# reference first, then the engine, then the singleton instances it
+# referenced) BEFORE this script ends - see qt_settings_app.py module
+# docstring's "Real-QML-object-vs-cache-release ordering" section.
+del item, photo, tab_bar, content_item, window
+del engine
+del diagnostics_controller
+del controller
+del model
+import gc
+gc.collect()
+
 print(json.dumps(results_out))
 """
 
@@ -1442,6 +1494,177 @@ class ButtonsPageHotspotGeometryTests(unittest.TestCase):
             "ok",
             "a real QTest click at OK's true physical center did not select "
             "OK - the OK hotspot is not centered on its own coordinate",
+        )
+
+
+class RunSettingsWindowTeardownOrderTests(unittest.TestCase):
+    """XRBM-033: a source-level, PySide6-independent regression guard for
+    ``run_settings_window()``'s explicit post-``app.exec()`` teardown order
+    (see qt_settings_app.py module docstring's "Real-QML-object-vs-cache-
+    release ordering" section) - the engine must be `del`d first (while it
+    still owns every root window/QML item and still references its
+    registered singletons), then ``diagnostics_controller``, then
+    ``controller``, then ``model``, then an explicit ``gc.collect()`` - all
+    of that between the ``app.exec()`` call and the function's ``return``.
+    An AST-level check (not gated on PySide6 - this never touches Qt at
+    all, matching ``DiagnosticsShutdownOrderingTests`` above) guards
+    against a future edit silently reordering, dropping, or moving any one
+    of these statements relative to ``app.exec()``/``return`` - the exact
+    class of regression a plain substring/behavioral test could miss.
+    """
+
+    def test_teardown_dels_and_gc_collect_run_in_order_after_exec_and_before_return(self):
+        import ast
+        import inspect
+
+        source = inspect.getsource(qt_settings_app.run_settings_window)
+        func = ast.parse(source).body[0]
+        self.assertIsInstance(func, ast.FunctionDef)
+
+        statement_kinds = []
+        for node in func.body:
+            if (
+                isinstance(node, ast.Assign)
+                and isinstance(node.value, ast.Call)
+                and isinstance(node.value.func, ast.Attribute)
+                and node.value.func.attr == "exec"
+            ):
+                statement_kinds.append("exec")
+            elif isinstance(node, ast.Delete):
+                (target,) = node.targets
+                statement_kinds.append(f"del:{target.id}")
+            elif (
+                isinstance(node, ast.Expr)
+                and isinstance(node.value, ast.Call)
+                and isinstance(node.value.func, ast.Attribute)
+                and node.value.func.attr == "collect"
+            ):
+                statement_kinds.append("gc.collect")
+            elif isinstance(node, ast.Return):
+                statement_kinds.append("return")
+
+        self.assertIn("exec", statement_kinds, "run_settings_window() no longer calls app.exec()")
+        exec_index = statement_kinds.index("exec")
+        self.assertEqual(
+            statement_kinds[exec_index:],
+            [
+                "exec",
+                "del:engine",
+                "del:diagnostics_controller",
+                "del:controller",
+                "del:model",
+                "gc.collect",
+                "return",
+            ],
+            "run_settings_window()'s post-exec() teardown order regressed - "
+            "see qt_settings_app.py module docstring's \"Real-QML-object-"
+            "vs-cache-release ordering\" section for why this exact order "
+            "is required",
+        )
+
+
+# Runs the REAL run_settings_window() end to end (QGuiApplication.exec()
+# closed automatically via a QTimer.singleShot(app.quit) scheduled before
+# the call - see below) in an isolated subprocess (same per-process
+# QQuickStyle/QQC2 constraints as every other real-engine probe in this
+# file: run_settings_window() itself sets "FluentWinUI3"). Wraps each of
+# the three singleton classes with a trivial subclass that records a
+# weakref to itself on construction - a real, functional proof (not just
+# the static AST check above) that by the time run_settings_window()
+# returns, its own explicit teardown has already dropped every reference
+# to the engine's registered singleton instances, rather than merely
+# hoping a LATER, implicit collection pass eventually would.
+_RUN_SETTINGS_WINDOW_TEARDOWN_PROBE_SCRIPT = r"""
+import json
+import weakref
+
+from ovb_rc003 import qt_settings_app as m
+
+classes = m._load_qt_classes()
+refs = []
+
+
+def _tracked(base):
+    class _Tracked(base):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            refs.append(weakref.ref(self))
+
+    _Tracked.__name__ = "Tracked" + base.__name__
+    return _Tracked
+
+
+classes["ButtonMappingModel"] = _tracked(classes["ButtonMappingModel"])
+classes["SettingsController"] = _tracked(classes["SettingsController"])
+classes["DiagnosticsController"] = _tracked(classes["DiagnosticsController"])
+classes["QQmlApplicationEngine"] = _tracked(classes["QQmlApplicationEngine"])
+
+QGuiApplication = classes["QGuiApplication"]
+app = QGuiApplication.instance() or QGuiApplication([])
+
+from PySide6.QtCore import QTimer
+
+QTimer.singleShot(500, app.quit)
+
+exit_code = m.run_settings_window()
+
+import gc
+
+gc.collect()
+
+alive_after_return = [r for r in refs if r() is not None]
+print(json.dumps({
+    "exit_code": exit_code,
+    "num_tracked": len(refs),
+    "num_alive_after_return": len(alive_after_return),
+}))
+"""
+
+
+@unittest.skipUnless(_HAS_PYSIDE6, _SKIP_REASON)
+class RunSettingsWindowTeardownFunctionalTests(unittest.TestCase):
+    """XRBM-033: a real, functional counterpart to
+    ``RunSettingsWindowTeardownOrderTests`` above - actually calls the real
+    production ``run_settings_window()`` (not a mirrored inline snippet)
+    end to end and proves, via weakrefs (see
+    ``_RUN_SETTINGS_WINDOW_TEARDOWN_PROBE_SCRIPT``), that none of the real
+    engine/model/controller/diagnostics-controller instances it constructs
+    are still reachable once it returns - the exact property that makes
+    this module's own ``atexit``-registered classes-cache release safe to
+    run afterward without racing a still-alive instance.
+    """
+
+    def test_no_tracked_qt_object_survives_run_settings_window_returning(self):
+        import json
+        import subprocess
+
+        env = dict(os.environ)
+        env.setdefault("QT_QPA_PLATFORM", "offscreen")
+        env["LOCALAPPDATA"] = tempfile.mkdtemp()
+        result = subprocess.run(
+            [sys.executable, "-c", _RUN_SETTINGS_WINDOW_TEARDOWN_PROBE_SCRIPT],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(
+            result.returncode,
+            0,
+            f"run_settings_window() teardown probe subprocess failed: "
+            f"{result.stdout}\n{result.stderr}",
+        )
+        data = json.loads(result.stdout.strip().splitlines()[-1])
+        self.assertGreaterEqual(
+            data["num_tracked"], 4, "probe did not construct the expected tracked objects"
+        )
+        self.assertEqual(
+            data["num_alive_after_return"],
+            0,
+            "one or more tracked engine/model/controller/diagnostics-"
+            "controller instances are still reachable after "
+            "run_settings_window() returned - the explicit teardown order "
+            "did not actually drop every reference",
         )
 
 

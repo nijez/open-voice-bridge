@@ -67,6 +67,35 @@ now happen inside that single function, in that explicit order - never
 relying on Python's ``atexit`` LIFO-ordered execution of separately
 registered functions, which is exactly what silently produced the wrong
 order the first time (see that function's docstring for the full story).
+
+Real-QML-object-vs-cache-release ordering (XRBM-033 - a separate hazard a
+real Windows CI run found, distinct from the diagnostics-worker race
+above): ``_release_qt_classes_cache()``'s ``gc.collect()`` call is only
+safe to run once every real instance of the three classes it caches
+(``ButtonMappingModel``/``SettingsController``/``DiagnosticsController``),
+and the ``QQmlApplicationEngine``/root window(s) that hold them as
+registered QML singletons, have already been destroyed. CPython does NOT
+guarantee any particular order for clearing a function's remaining local
+variables at return, or a module's ``__main__`` globals at interpreter
+shutdown - so a process that builds these objects and then simply lets
+them go out of scope implicitly (rather than tearing them down explicitly,
+synchronously, before returning/exiting) leaves the actual destruction
+order effectively unspecified relative to this module's ``atexit`` hook.
+On real Windows Qt/shiboken builds this manifested as a real access
+violation (``0xC0000005``) at process exit in the real, real-``main.qml``-
+loading offscreen probe in ``tests/test_qt_settings_app.py``
+(``OffscreenQmlLoadTests`` - the module-level globals in that probe's own
+``-c`` script are exactly the case above). ``run_settings_window()`` below,
+and every real-QML-engine-loading probe script in
+``tests/test_qt_settings_app.py``, therefore now explicitly `del`s its
+engine/root-object/singleton references, in the one safe order (every root
+window/QML item first, then the ``QQmlApplicationEngine`` itself - which
+internally releases its registered-singleton pointers as part of its own
+teardown - then, only once the engine is fully gone, the singleton
+instances themselves), followed by an explicit ``gc.collect()`` - all of it
+BEFORE returning/letting the script end, so nothing from this module's
+classes cache is still alive by the time this module's own ``atexit`` hook
+later runs its own release/collect step.
 """
 
 from __future__ import annotations
@@ -1252,4 +1281,20 @@ def run_settings_window() -> int:
     if not engine.rootObjects():
         raise QtUnavailableError(f"无法加载 QML 设置界面：{main_qml} 未能成功加载。")
 
-    return app.exec()
+    exit_code = app.exec()
+
+    # XRBM-033: explicit, deterministic teardown - see module docstring's
+    # "Real-QML-object-vs-cache-release ordering" section. The engine (and
+    # every root window/QML item it owns) must be destroyed FIRST, while
+    # the singleton instances it internally references are still alive;
+    # only once it is fully gone are the singleton instances' own last
+    # references dropped. This must happen HERE, before returning, so this
+    # module's atexit-registered `_release_qt_classes_cache()` never races
+    # a still-alive instance of a class it is about to release.
+    del engine
+    del diagnostics_controller
+    del controller
+    del model
+    gc.collect()
+
+    return exit_code
