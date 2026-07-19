@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
+from collections.abc import Sequence
 from unittest import mock
 
 from ovb_rc003 import (
@@ -663,14 +664,26 @@ class BleDiagnosticsSubprocessEntrypointTests(unittest.TestCase):
             exit_code = diag.run_ble_diagnostics_subprocess_entrypoint(self._result_path)
 
         self.assertEqual(exit_code, 0)
-        # This host has no real winrt packages installed - the real,
-        # unmocked ble_transport_winrt.discover_candidates() call this
-        # entrypoint makes (In-scope item 5: never mock/skip real BLE
-        # inside this function itself) therefore genuinely raises
-        # WinRTUnavailableError, exactly as it would on a non-Windows CI
-        # runner - proving the whole real call chain still works with a
-        # None stdout/stderr/stdin, not just a mocked-out shortcut.
-        self.assertEqual(self._read_result(), {"verdict": "winrt_unavailable"})
+        # XRBM-035 RETRY 2 (Windows CI red evidence, run 29683435697): this
+        # host's real, unmocked ble_transport_winrt.discover_candidates()
+        # call (In-scope item 5: never mock/skip real BLE inside this
+        # function itself) can legitimately land on more than one verdict
+        # depending on the platform it actually runs on - macOS/Linux CI
+        # has no winrt packages at all ("winrt_unavailable"), while a real
+        # Windows runner has WinRT installed and, per this exact red
+        # evidence, no paired RC003 ("no_candidate"); a real paired device
+        # would give "single_match"/"ambiguous" instead. The true, platform-
+        # independent contract this test exists to prove is narrower than
+        # any one of those: stdout/stderr/stdin being None never stops this
+        # function from writing a real, strictly-whitelisted IPC result
+        # (see _sanitize_verdict_payload()) - re-validating the file's raw
+        # content through that same parser both proves it is well-formed
+        # AND excludes "error" (an unexpected real discovery failure this
+        # test must still catch, never silently accept as a stand-in for
+        # any of the legitimate outcomes above).
+        payload = self._read_result()
+        sanitized = diag._sanitize_verdict_payload(payload)
+        self.assertNotEqual(sanitized.verdict, diag.BleDiagnosticsVerdict.ERROR)
 
     def test_no_candidate_verdict_is_written_for_an_empty_candidate_list(self):
         async def _empty_discover():
@@ -908,13 +921,21 @@ class RunBleDiagnosticsSubprocessTests(unittest.TestCase):
                 timeout=30.0,
                 popen=popen,
             )
-            # This host has no real winrt packages - the real child process
-            # genuinely reaches WinRTUnavailableError on its own, proving
-            # the full real spawn -> real discovery attempt -> real file
-            # write -> parent read round-trip, not a mocked stand-in.
-            self.assertEqual(result.verdict, diag.BleDiagnosticsVerdict.WINRT_UNAVAILABLE)
+            # XRBM-035 RETRY 2 (Windows CI red evidence, run 29683435697):
+            # the real child process's actual verdict depends on what
+            # platform it genuinely runs on - macOS/Linux CI has no winrt
+            # packages ("winrt_unavailable"), while a real Windows runner
+            # has WinRT installed and, per this exact red evidence, no
+            # paired RC003 ("no_candidate"); a real paired device would
+            # give "single_match"/"ambiguous" instead. Every one of those
+            # is proof of the same real spawn -> real discovery attempt ->
+            # real file write -> parent read round-trip this test exists
+            # to exercise, so none of them may be hardcoded as THE expected
+            # result. "error" is deliberately excluded - it would mean the
+            # real child hit an unexpected failure, which this test must
+            # still catch, never silently accept.
+            self.assertNotEqual(result.verdict, diag.BleDiagnosticsVerdict.ERROR)
         finally:
-
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_cancel_event_already_set_never_spawns_a_process_at_all(self):
@@ -1055,14 +1076,51 @@ class DiscoverBleCandidatesSyncTests(unittest.TestCase):
     result-directory's own cleanup contract (XRBM-035 RETRY 1 P3).
     """
 
-    def test_real_subprocess_round_trip_raises_winrt_unavailable_on_this_host(self):
+    def test_real_subprocess_round_trip_returns_a_legitimate_result_on_this_host(self):
         # No mocking anywhere in this test - a REAL subprocess is spawned
-        # (via the real build_ble_diagnostics_subprocess_command()), and
-        # this host genuinely has no winrt packages installed, so this
+        # (via the real build_ble_diagnostics_subprocess_command()), so this
         # proves the entire real pipeline (spawn, write, confirm-exit,
         # read, sanitize, reconstruct) end-to-end.
-        with self.assertRaises(ble_transport_winrt.WinRTUnavailableError):
-            diag._discover_ble_candidates_sync(timeout=30.0)
+        #
+        # XRBM-035 RETRY 2 (Windows CI red evidence, run 29683435697): the
+        # real, correct result depends on what platform this genuinely runs
+        # on, not on this test's NAME - macOS/Linux CI has no winrt
+        # packages at all, so _candidates_from_verdict() raises
+        # WinRTUnavailableError; a real Windows runner has WinRT installed
+        # and, per this exact red evidence, no paired RC003, so the same
+        # real pipeline instead returns an (empty) candidate list - both
+        # are honest, correct outcomes of this module's own contract
+        # (windows_diagnostics.py's "-- BLE candidate --" section), not a
+        # test failure. Only WinRTUnavailableError is caught here - any
+        # OTHER exception (e.g. the RuntimeError _candidates_from_verdict()
+        # raises for a real "error" verdict) still fails this test, exactly
+        # as before.
+        try:
+            candidates = diag._discover_ble_candidates_sync(timeout=30.0)
+        except ble_transport_winrt.WinRTUnavailableError:
+            return
+
+        # XRBM-035 RETRY 2 (independent review): `assertIsInstance(list(x),
+        # list)` is vacuously true for ANY iterable and proves nothing about
+        # the real production contract - assert that shape directly
+        # instead. `_candidates_from_verdict()` only ever returns a real
+        # Sequence (never an arbitrary iterable/generator), bounded by
+        # `_MAX_PLAUSIBLE_AMBIGUOUS_COUNT` (the same strict cap
+        # `_sanitize_verdict_payload()` already enforces on the raw IPC
+        # count before any candidate is ever reconstructed from it), and
+        # every reconstructed placeholder candidate has an EMPTY name and
+        # `hardware_match=True` (see `_candidates_from_verdict()`'s own
+        # docstring) - proving the real device name from this host's real
+        # WinRT/BLE stack never crossed the subprocess IPC boundary into
+        # this process, not just that "some list-like thing came back". An
+        # empty list (the real "no_candidate" outcome the RETRY 2 red
+        # evidence's Windows runner actually hit) trivially satisfies every
+        # assertion below - nothing here forces a specific non-empty shape.
+        self.assertIsInstance(candidates, Sequence)
+        self.assertLessEqual(len(candidates), diag._MAX_PLAUSIBLE_AMBIGUOUS_COUNT)
+        for candidate in candidates:
+            self.assertEqual(candidate.name, "")
+            self.assertIs(candidate.hardware_match, True)
 
     def test_result_directory_is_always_removed_afterward(self):
         created_dirs = []
@@ -1073,9 +1131,17 @@ class DiscoverBleCandidatesSyncTests(unittest.TestCase):
             created_dirs.append(path)
             return path
 
+        # XRBM-035 RETRY 2: the temp result directory must be removed
+        # whether this host's real discovery attempt raises
+        # WinRTUnavailableError (macOS/Linux CI) or returns normally with a
+        # real candidate list (a real Windows runner - see the sibling test
+        # above for the full platform rationale) - cleanup is not
+        # conditional on which of those two legitimate outcomes occurs.
         with mock.patch.object(tempfile, "mkdtemp", _tracking_mkdtemp):
-            with self.assertRaises(ble_transport_winrt.WinRTUnavailableError):
+            try:
                 diag._discover_ble_candidates_sync(timeout=30.0)
+            except ble_transport_winrt.WinRTUnavailableError:
+                pass
 
         self.assertEqual(len(created_dirs), 1)
         self.assertFalse(os.path.exists(created_dirs[0]), "the temp result directory must be cleaned up")
