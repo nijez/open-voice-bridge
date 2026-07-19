@@ -29,44 +29,67 @@ subclass or extra locking. An ``_is_refreshing`` guard refuses to start a
 second worker while one is already running (repeated "重新检测" clicks never
 overlap).
 
-Thread lifecycle at process exit (corrected in XRBM-031 RETRY 1 item 6 - the
-previous wording here overclaimed this): every background thread this
+Thread lifecycle at window close / process exit (XRBM-035, hardened again in
+RETRY 1 - a real Windows CI crash, not merely a theoretical race,
+superseded the previous "best-effort atexit join + daemon=True is good
+enough" contract described here before): every background thread this
 controller starts is tracked in ``_diagnostics_threads``, and
-``_shutdown_qt_settings_app_at_exit()`` (the ONE function this module
-registers via ``atexit`` - see that function's own docstring for why it
-deliberately is not two separately-registered functions) makes a
-BEST-EFFORT, individually-BOUNDED join attempt on each
-(``_DIAGNOSTICS_THREAD_JOIN_TIMEOUT_SECONDS`` per thread) as a courtesy, so a
-normal, fast-completing check has usually already finished by the time the
-process exits. This is NOT a proof that no thread survives - a real,
-slow/hung Windows/WinRT/PortAudio call (which this project cannot rule out
-without real hardware) can still be running after the timeout elapses, and
-the hook returns anyway rather than blocking exit indefinitely. What IS
-guaranteed: every one of these threads is created with ``daemon=True``, so
-CPython itself never waits for it at interpreter shutdown either way - a
-surviving thread is abandoned, not a hang, matching every other daemon
-thread already in this codebase (e.g. ``raw_input_windows.py``'s listener
-thread).
+``_shutdown_diagnostics_workers()`` signals shutdown and makes a BOUNDED
+join attempt on each (``_DIAGNOSTICS_THREAD_JOIN_TIMEOUT_SECONDS`` per
+thread - DERIVED from ``windows_diagnostics.BLE_DISCOVERY_MAX_CANCELLATION_
+SECONDS`` plus a safety margin, not an independently-guessed value - see
+that constant's own definition below). The critical fix is WHEN this runs:
+``run_settings_window()`` now calls it EXPLICITLY, synchronously, from a
+``try/finally`` that starts right after ``DiagnosticsController`` is
+constructed (i.e. right after its background worker could first exist) and
+covers every exit path through ``app.exec()`` returning, ``engine.load()``
+raising, or ``rootObjects()`` coming back empty - while every Qt/Python
+object it built is still fully alive - not only via this module's
+``atexit`` hook (``_shutdown_qt_settings_app_at_exit()``, still registered
+as a defense-in-depth safety net for callers that bypass
+``run_settings_window()``). A real Windows CI faulthandler dump proved the
+old atexit-only timing insufficient: a background BLE-discovery worker was
+still deep inside a native WinRT await when the interpreter itself began
+finalizing, producing an ``0xC0000005`` access violation - daemon=True only
+guarantees CPython does not block exit on a surviving thread, it says
+nothing about whether that thread's native call can safely keep running
+concurrently with interpreter teardown.
 
-Shutdown-vs-teardown ordering (XRBM-031 RETRY 2 - a narrower race an
-independent review found in RETRY 1's fix): a diagnostics worker still
-finishing at process-exit time must never emit its result INTO a
-``DiagnosticsController``/Qt runtime that ``_release_qt_classes_cache()``
-may already have started tearing down. Two things make this safe:
-``_diagnostics_shutdown_event`` (a module-level ``threading.Event``) is set
-FIRST, before anything else, by ``_shutdown_qt_settings_app_at_exit()`` -
-``refreshDiagnostics()`` refuses to start a new worker once it is set, and a
-worker already running checks it immediately before emitting and skips the
-emit entirely if it is set (any exception the emit call raises anyway - the
-receiver could still be mid-teardown despite the check - is caught and
-discarded, never crashing the worker thread); and every worker's
-``finally`` block unconditionally calls ``_forget_diagnostics_thread()``,
-so the registry is cleaned up even on that path. All THREE shutdown steps
-(flag the shutdown, join outstanding workers, release the Qt classes cache)
-now happen inside that single function, in that explicit order - never
-relying on Python's ``atexit`` LIFO-ordered execution of separately
-registered functions, which is exactly what silently produced the wrong
-order the first time (see that function's docstring for the full story).
+RETRY 1's independent review found the round-1 fix for the discovery side
+itself - cancelling the asyncio Task awaiting ``discover_candidates()`` -
+was ALSO insufficient: the locked pywinrt wrapper's own post-cancel wait is
+itself unbounded (see ``windows_diagnostics.py``'s "-- BLE candidate --"
+section for the exact source citation), so an in-process asyncio
+cancellation request could never give a real hard bound either. BLE
+candidate discovery therefore now runs in a genuinely separate, disposable
+OS PROCESS (``windows_diagnostics._run_ble_diagnostics_subprocess()``) that
+the parent can forcibly terminate/kill and CONFIRM dead within a real,
+OS-enforced bound - the shutdown event doubles as that cancellation signal
+(not just an emit-skip flag - see below), so a discovery attempt in flight
+when shutdown begins is actually asked to stop and confirmed to have
+stopped, giving the bounded join here a realistic chance to succeed instead
+of only ever timing out. Every one of these threads is still created with
+``daemon=True`` too, as a last-resort backstop if a future failure mode
+ever defeats the process-level isolation above.
+
+Shutdown-vs-teardown ordering (XRBM-031 RETRY 2, still true under XRBM-035):
+a diagnostics worker still finishing around shutdown time must never emit
+its result INTO a ``DiagnosticsController``/Qt runtime that
+``_release_qt_classes_cache()`` may already have started tearing down. Two
+things make this safe: ``_diagnostics_shutdown_event`` (a module-level
+``threading.Event``) is set FIRST, before anything else, by
+``_shutdown_diagnostics_workers()`` - ``refreshDiagnostics()`` refuses to
+start a new worker once it is set, and a worker already running checks it
+immediately before emitting and skips the emit entirely if it is set (any
+exception the emit call raises anyway - the receiver could still be
+mid-teardown despite the check - is caught and discarded, never crashing
+the worker thread); and every worker's ``finally`` block unconditionally
+calls ``_forget_diagnostics_thread()``, so the registry is cleaned up even
+on that path. ``_shutdown_qt_settings_app_at_exit()`` still runs all three
+shutdown steps (flag the shutdown, join outstanding workers, release the Qt
+classes cache) in that explicit order, in one function - never relying on
+Python's ``atexit`` LIFO-ordered execution of separately registered
+functions (see that function's docstring for the full story).
 """
 
 from __future__ import annotations
@@ -155,11 +178,33 @@ _diagnostics_threads_lock = threading.Lock()
 # process-global, persistent state, not per-test.
 _diagnostics_shutdown_event = threading.Event()
 
+# Safety margin ON TOP OF windows_diagnostics.BLE_DISCOVERY_MAX_
+# CANCELLATION_SECONDS below - covers the worker thread's own minimal
+# cleanup after _run_ble_diagnostics_subprocess() returns/raises (returning
+# through check_ble_candidate()/run_diagnostics()/_run_in_background()'s own
+# finally block), not the subprocess termination itself.
+_DIAGNOSTICS_THREAD_JOIN_SAFETY_MARGIN_SECONDS = 2.0
+
 # Per-thread bound for the best-effort atexit join below - a module-level
 # constant (rather than a literal inline) specifically so a test can lower
 # it and prove the join is genuinely bounded/non-hanging without waiting
 # out the real default (see tests/test_qt_settings_app.py).
-_DIAGNOSTICS_THREAD_JOIN_TIMEOUT_SECONDS = 2.0
+#
+# XRBM-035 RETRY 1 P1 #2: DERIVED from windows_diagnostics.BLE_DISCOVERY_
+# MAX_CANCELLATION_SECONDS (poll-detection latency + both escalating
+# subprocess-termination waits), not an independently-guessed flat value -
+# an independent review found the previous flat 2.0s was actually SMALLER
+# than that module's own worst-case termination bound (poll 0.1s +
+# terminate_wait 2.0s + kill_wait 2.0s = 4.1s), so this join could return
+# "timed out" even on the happy path where the subprocess layer behaved
+# exactly as designed and eventually confirmed the child's death. Deriving
+# this value FROM that module's own constant means the two can never
+# silently drift apart again - if that module's termination bound ever
+# changes, this one moves with it automatically.
+_DIAGNOSTICS_THREAD_JOIN_TIMEOUT_SECONDS = (
+    windows_diagnostics.BLE_DISCOVERY_MAX_CANCELLATION_SECONDS
+    + _DIAGNOSTICS_THREAD_JOIN_SAFETY_MARGIN_SECONDS
+)
 
 
 def _remember_diagnostics_thread(thread: "threading.Thread") -> None:
@@ -239,15 +284,59 @@ def _release_qt_classes_cache() -> None:
     gc.collect()
 
 
+def _shutdown_diagnostics_workers() -> None:
+    """The ONE production shutdown contract for in-flight diagnostics
+    workers (XRBM-035): flag shutdown, THEN bounded-wait for every tracked
+    worker thread - steps 1+2 of ``_shutdown_qt_settings_app_at_exit()``'s
+    three steps, factored out into their own function so both
+    ``run_settings_window()`` (called explicitly right after ``app.exec()``
+    returns, while every Qt/Python object it built is still fully alive -
+    see that function) and the real QML load probe
+    (``tests/test_qt_settings_app.py``'s ``_QML_LOAD_PROBE_SCRIPT``, which
+    reproduces a settings window closing before a real background BLE
+    discovery finishes) call the EXACT SAME helper, instead of each
+    reimplementing shutdown or relying solely on this module's ``atexit``
+    hook.
+
+    Why this matters (XRBM-034 REPLAN, XRBM-035 red evidence): a Windows CI
+    run's faulthandler dump showed the real crash thread still deep inside
+    ``ble_transport_winrt.discover_candidates()``'s WinRT
+    ``find_all_async_aqs_filter`` await, called from a
+    ``DiagnosticsController`` background worker, well after this module's
+    own ``atexit``-only join had already returned (its 2-second best-effort
+    bound elapsing without the thread actually stopping) - by the time the
+    interpreter itself began finalizing, that native WinRT call was still
+    running concurrently with CPython/shiboken teardown, producing the
+    observed ``0xC0000005`` access violation. Calling this function
+    EXPLICITLY, synchronously, at the natural point the window is closing
+    (not only via ``atexit``, which can fire arbitrarily late relative to
+    Qt/native object teardown) gives every in-flight BLE discovery a real,
+    bounded chance to be forcibly terminated and CONFIRMED dead at the OS
+    process level (see
+    ``windows_diagnostics._run_ble_diagnostics_subprocess()``) before that
+    teardown ever begins - not merely a best-effort join on a thread nothing
+    ever asked to stop.
+
+    Idempotent - ``_begin_diagnostics_shutdown()`` is (``Event.set()`` is
+    always safe to call more than once) and ``_join_diagnostics_threads_at_
+    exit()`` is (an empty/already-finished registry joins instantly) - safe
+    to call once here and again later via ``_shutdown_qt_settings_app_at_
+    exit()`` as a defense-in-depth safety net for any path that does not go
+    through ``run_settings_window()``.
+    """
+
+    _begin_diagnostics_shutdown()
+    _join_diagnostics_threads_at_exit()
+
+
 def _shutdown_qt_settings_app_at_exit() -> None:
     """The ONLY function this module registers via ``atexit`` (XRBM-031
     RETRY 2). Runs every shutdown step in one explicit, hard-coded order:
 
-    1. ``_begin_diagnostics_shutdown()`` - flags shutdown FIRST, before
-       anything else, so ``refreshDiagnostics()`` stops accepting new work
-       and any worker already running knows to skip emitting its result;
-    2. ``_join_diagnostics_threads_at_exit()`` - a bounded, best-effort
-       join attempt on every tracked worker thread;
+    1.-2. ``_shutdown_diagnostics_workers()`` - flags shutdown, then makes a
+       bounded join attempt on every tracked worker thread (see that
+       function's own docstring for why this is also called explicitly by
+       ``run_settings_window()``, not only reached here);
     3. ``_release_qt_classes_cache()`` - only now, after every worker has
        either finished or had its bounded join time out, release the
        cached Qt classes.
@@ -266,10 +355,14 @@ def _shutdown_qt_settings_app_at_exit() -> None:
     LIFO ordering (and the silent-breakage risk of some future edit
     reordering two separate ``atexit.register()`` calls) entirely - the
     order is just ordinary, explicit Python statement order here.
+
+    This remains registered as a defense-in-depth safety net (e.g. for a
+    caller that never reaches ``run_settings_window()``'s own explicit
+    call) - production windows must never depend on ``atexit`` alone; see
+    ``_shutdown_diagnostics_workers()``'s docstring for why.
     """
 
-    _begin_diagnostics_shutdown()
-    _join_diagnostics_threads_at_exit()
+    _shutdown_diagnostics_workers()
     _release_qt_classes_cache()
 
 
@@ -1034,6 +1127,15 @@ def _load_qt_classes() -> dict:
                         report = windows_diagnostics.run_diagnostics(
                             saved_output_name=saved_name,
                             saved_output_host_api=saved_host_api,
+                            # XRBM-035: the SAME event this module's
+                            # shutdown helpers set - a discovery attempt
+                            # still in flight when the settings window
+                            # starts closing is now actually cancelled at
+                            # the WinRT level (see
+                            # windows_diagnostics._discover_candidates_
+                            # cancellable()), not merely abandoned to run
+                            # concurrently with interpreter shutdown.
+                            cancel_event=_diagnostics_shutdown_event,
                         )
                     except Exception:  # noqa: BLE001 - never crash the worker thread
                         report = None
@@ -1204,52 +1306,80 @@ def run_settings_window() -> int:
     controller = SettingsController(model)
     diagnostics_controller = DiagnosticsController(controller, config.config_root())
 
-    # Exposed to QML as SINGLETONS (resolved through the type/import system
-    # at document-compile time), not as engine.rootContext() context
-    # properties: a root-context property is resolved dynamically through
-    # each QML object's context chain, and - empirically, reproduced with a
-    # minimal isolated repro during this task - a context property can
-    # observe a transient/incorrectly-null value the first time it is read
-    # from a binding evaluated during a child component's own construction
-    # (e.g. a ListView's currentIndex binding, or any property evaluated
-    # inside a ScrollView's deferred content), before every containing
-    # component has finished having its own externally-supplied properties
-    # assigned. A qmlRegisterSingletonInstance()-registered type has no such
-    # hazard: every file that `import`s this module gets the exact same
-    # already-fully-constructed instance immediately, with no per-context
-    # propagation/ordering involved at all.
-    qmlRegisterSingletonInstance(
-        SettingsController,
-        _QML_MODULE_URI,
-        1,
-        0,
-        _QML_CONTROLLER_TYPE_NAME,
-        controller,
-    )
-    qmlRegisterSingletonInstance(
-        ButtonMappingModel,
-        _QML_MODULE_URI,
-        1,
-        0,
-        _QML_MAPPING_MODEL_TYPE_NAME,
-        model,
-    )
-    qmlRegisterSingletonInstance(
-        DiagnosticsController,
-        _QML_MODULE_URI,
-        1,
-        0,
-        _QML_DIAGNOSTICS_TYPE_NAME,
-        diagnostics_controller,
-    )
+    # XRBM-035 RETRY 1 P2: DiagnosticsController's own __init__() (just
+    # above) already started a real background diagnostics worker (see that
+    # class's docstring) - EVERYTHING from here through app.exec() returning
+    # must therefore go through the SAME shutdown contract on every exit
+    # path, not only the happy one. The independent review that requested
+    # this found the previous version's try/finally started only at
+    # app.exec() itself: an engine.load() exception or an empty
+    # rootObjects() (both handled below, BOTH capable of raising before
+    # app.exec() is ever reached) would skip _shutdown_diagnostics_workers()
+    # entirely, leaving that worker to fall back to this module's atexit
+    # hook alone - exactly the insufficient-timing contract XRBM-035's own
+    # red evidence already disproved once.
+    try:
+        # Exposed to QML as SINGLETONS (resolved through the type/import
+        # system at document-compile time), not as engine.rootContext()
+        # context properties: a root-context property is resolved
+        # dynamically through each QML object's context chain, and -
+        # empirically, reproduced with a minimal isolated repro during this
+        # task - a context property can observe a transient/incorrectly-null
+        # value the first time it is read from a binding evaluated during a
+        # child component's own construction (e.g. a ListView's
+        # currentIndex binding, or any property evaluated inside a
+        # ScrollView's deferred content), before every containing component
+        # has finished having its own externally-supplied properties
+        # assigned. A qmlRegisterSingletonInstance()-registered type has no
+        # such hazard: every file that `import`s this module gets the exact
+        # same already-fully-constructed instance immediately, with no
+        # per-context propagation/ordering involved at all.
+        qmlRegisterSingletonInstance(
+            SettingsController,
+            _QML_MODULE_URI,
+            1,
+            0,
+            _QML_CONTROLLER_TYPE_NAME,
+            controller,
+        )
+        qmlRegisterSingletonInstance(
+            ButtonMappingModel,
+            _QML_MODULE_URI,
+            1,
+            0,
+            _QML_MAPPING_MODEL_TYPE_NAME,
+            model,
+        )
+        qmlRegisterSingletonInstance(
+            DiagnosticsController,
+            _QML_MODULE_URI,
+            1,
+            0,
+            _QML_DIAGNOSTICS_TYPE_NAME,
+            diagnostics_controller,
+        )
 
-    engine = QQmlApplicationEngine()
-    qml_dir = _qml_directory()
-    engine.addImportPath(str(qml_dir))
+        engine = QQmlApplicationEngine()
+        qml_dir = _qml_directory()
+        engine.addImportPath(str(qml_dir))
 
-    main_qml = qml_dir / "main.qml"
-    engine.load(QUrl.fromLocalFile(str(main_qml)))
-    if not engine.rootObjects():
-        raise QtUnavailableError(f"无法加载 QML 设置界面：{main_qml} 未能成功加载。")
+        main_qml = qml_dir / "main.qml"
+        engine.load(QUrl.fromLocalFile(str(main_qml)))
+        if not engine.rootObjects():
+            raise QtUnavailableError(f"无法加载 QML 设置界面：{main_qml} 未能成功加载。")
 
-    return app.exec()
+        return app.exec()
+    finally:
+        # XRBM-035: called HERE, synchronously - whether app.exec()
+        # returned normally, engine.load() raised, rootObjects() was empty,
+        # or anything else in this block raised - and BEFORE this
+        # function's own local Qt/Python objects (engine,
+        # diagnostics_controller, controller, model) go out of scope - i.e.
+        # while they are all still fully alive, not during interpreter
+        # shutdown. Signals any in-flight diagnostics worker to stop and
+        # gives it a real, bounded chance to actually finish (see
+        # _shutdown_diagnostics_workers()'s own docstring for the full
+        # story/red evidence this fixes) instead of relying solely on this
+        # module's atexit hook, which fires arbitrarily later - possibly
+        # after native Qt/WinRT teardown has already begun.
+        _shutdown_diagnostics_workers()

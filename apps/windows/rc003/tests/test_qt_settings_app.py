@@ -7,10 +7,17 @@ rather than the host OS, since these are meant to run for REAL wherever Qt
 is actually installed (including the real Windows CI runner, now that
 PySide6-Essentials is a pinned requirement - see requirements.txt).
 
-No real Windows device, BLE/HID/audio, or subprocess is ever touched here:
+No real Windows device or real BLE/HID/audio hardware is ever touched here:
 bridge_launcher.launch_bridge()/shell_targets.open_external_target() are
 monkeypatched exactly like tests/test_bridge_launcher.py and
-tests/test_shell_targets.py already do at their own layer.
+tests/test_shell_targets.py already do at their own layer. Real, disposable
+CHILD PROCESSES are deliberately spawned by some tests below (XRBM-035
+RETRY 1): DiagnosticsController's real BLE candidate check now runs its
+discovery in a genuinely separate OS process (see windows_diagnostics.py's
+"-- BLE candidate --" section) - this file's own shutdown/probe tests
+exercise that real process boundary rather than mocking it away, since the
+whole point of that design is a real, OS-confirmed hard bound this project
+cannot prove any other way.
 """
 
 import os
@@ -668,6 +675,58 @@ class DiagnosticsControllerTests(unittest.TestCase):
         # dangling registry entry despite the injected emit failure.
         self.assertEqual(len(qt_settings_app._diagnostics_threads), 0)
 
+    def test_shutdown_helper_actually_kills_a_hanging_ble_diagnostics_subprocess_and_worker_never_emits(self):
+        # XRBM-035 RETRY 1: end-to-end reproduction of the real Windows CI
+        # crash cause - a hung WinRT BLE discovery still running when the
+        # process started exiting - now using the REAL, unmodified
+        # windows_diagnostics.run_diagnostics()/check_ble_candidate()/
+        # _discover_ble_candidates_sync()/_run_ble_diagnostics_subprocess()
+        # call chain. Only the CHILD PROCESS COMMAND itself is replaced
+        # (build_ble_diagnostics_subprocess_command()) with one that spawns
+        # a genuine, artificially-hanging OS process instead of the real
+        # ovb_rc003 entrypoint - discovery still runs in a real, separate
+        # process, and the real terminate()/kill()/wait() escalation this
+        # RETRY exists for is exercised for real, through the production
+        # _shutdown_diagnostics_workers() helper - the same one
+        # run_settings_window() and the real QML load probe both call.
+        hang_script = "import time\ntime.sleep(120)\n"
+
+        def _fake_command(result_path, **kwargs):
+            return [sys.executable, "-c", hang_script]
+
+        settings_controller = self._make_settings_controller()
+        with mock.patch.object(
+            windows_diagnostics, "build_ble_diagnostics_subprocess_command", _fake_command
+        ):
+            diag = self.DiagnosticsController(settings_controller, self._config_root)
+            self.assertTrue(diag.isRefreshing)
+            self.app.processEvents()
+
+            # Give the worker thread a real chance to actually spawn the
+            # hanging child before shutdown is requested - not strictly
+            # required for correctness (the subprocess module handles a
+            # not-yet-spawned/racing spawn fine either way), but makes this
+            # test reliably exercise the "kill an already-running child"
+            # path rather than sometimes short-circuiting before spawn.
+            time.sleep(0.2)
+
+            started = time.monotonic()
+            qt_settings_app._shutdown_diagnostics_workers()
+            elapsed = time.monotonic() - started
+
+        self.assertLess(
+            elapsed,
+            qt_settings_app._DIAGNOSTICS_THREAD_JOIN_TIMEOUT_SECONDS + 1.0,
+            "shutdown must bound-wait, not hang on the killed worker",
+        )
+        self.assertEqual(len(qt_settings_app._diagnostics_threads), 0, "the worker thread must have finished")
+        # The worker was cancelled before it could finish - its (never
+        # produced) result must never have been emitted, matching the
+        # never-emit-after-shutdown contract the RETRY 2 tests above cover
+        # for the non-hanging case.
+        self.assertTrue(diag.isRefreshing)
+        self.assertEqual(diag.checkResults, [])
+
     def test_select_detected_cable_input_persists_via_settings_controller(self):
         settings_controller = self._make_settings_controller()
         diag = self.DiagnosticsController(settings_controller, self._config_root)
@@ -809,6 +868,122 @@ class DiagnosticsControllerTests(unittest.TestCase):
         self.assertNotIn("安装成功", diag.driverInfoMessage)
 
 
+@unittest.skipUnless(_HAS_PYSIDE6, _SKIP_REASON)
+class RunSettingsWindowShutdownCoverageTests(unittest.TestCase):
+    """XRBM-035 RETRY 1 P2/E: ``run_settings_window()``'s production
+    shutdown contract must cover every exit path starting right after
+    ``DiagnosticsController`` is constructed (that constructor already
+    started a real background worker) - not only ``app.exec()`` returning
+    normally, which is all the previous round's ``try/finally`` covered.
+    Drives the REAL function end to end (never a source-level/AST proxy) -
+    only the Qt WINDOW plumbing (``QGuiApplication``/``QQmlApplicationEngine``
+    /``QQuickStyle``/``QUrl``/``qmlRegisterSingletonInstance``) is replaced
+    with small, fully-controllable fakes (real PySide6/shiboken C++ types
+    are not reliably monkeypatchable, and no real QML window needs to exist
+    to prove this contract) - ``ButtonMappingModel``/``SettingsController``/
+    ``DiagnosticsController`` stay the REAL classes ``_load_qt_classes()``
+    itself already produced, so the background worker this test is actually
+    about is completely real.
+    """
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._env_patch = mock.patch.dict(os.environ, {"LOCALAPPDATA": self._tmpdir.name})
+        self._env_patch.start()
+        qt_settings_app._diagnostics_shutdown_event.clear()
+
+    def tearDown(self):
+        qt_settings_app._diagnostics_shutdown_event.clear()
+        self._env_patch.stop()
+        self._tmpdir.cleanup()
+
+    def _fake_classes(self, *, load_side_effect=None, root_objects=None, exec_return=0):
+        real_classes = qt_settings_app._load_qt_classes()
+        root_objects = [] if root_objects is None else root_objects
+
+        class _FakeEngine:
+            def addImportPath(self, path):
+                pass
+
+            def load(self, url):
+                if load_side_effect is not None:
+                    raise load_side_effect
+
+            def rootObjects(self):
+                return root_objects
+
+        class _FakeApp:
+            def __init__(self, argv=None):
+                pass
+
+            @staticmethod
+            def instance():
+                return None
+
+            def exec(self):
+                return exec_return
+
+        class _FakeQQuickStyle:
+            @staticmethod
+            def setStyle(name):
+                pass
+
+        class _FakeQUrl:
+            @staticmethod
+            def fromLocalFile(path):
+                return path
+
+        fake_classes = dict(real_classes)
+        fake_classes["QGuiApplication"] = _FakeApp
+        fake_classes["QQmlApplicationEngine"] = _FakeEngine
+        fake_classes["QQuickStyle"] = _FakeQQuickStyle
+        fake_classes["QUrl"] = _FakeQUrl
+        fake_classes["qmlRegisterSingletonInstance"] = lambda *args, **kwargs: None
+        return fake_classes
+
+    def test_engine_load_raising_still_runs_the_production_shutdown_helper(self):
+        fake_classes = self._fake_classes(load_side_effect=RuntimeError("simulated engine.load() failure"))
+        with mock.patch.object(qt_settings_app, "_load_qt_classes", return_value=fake_classes):
+            with mock.patch.object(
+                qt_settings_app,
+                "_shutdown_diagnostics_workers",
+                wraps=qt_settings_app._shutdown_diagnostics_workers,
+            ) as shutdown_spy:
+                with self.assertRaises(RuntimeError):
+                    qt_settings_app.run_settings_window()
+
+        shutdown_spy.assert_called()
+        self.assertEqual(len(qt_settings_app._diagnostics_threads), 0)
+
+    def test_empty_root_objects_still_runs_the_production_shutdown_helper(self):
+        fake_classes = self._fake_classes(root_objects=[])
+        with mock.patch.object(qt_settings_app, "_load_qt_classes", return_value=fake_classes):
+            with mock.patch.object(
+                qt_settings_app,
+                "_shutdown_diagnostics_workers",
+                wraps=qt_settings_app._shutdown_diagnostics_workers,
+            ) as shutdown_spy:
+                with self.assertRaises(qt_settings_app.QtUnavailableError):
+                    qt_settings_app.run_settings_window()
+
+        shutdown_spy.assert_called()
+        self.assertEqual(len(qt_settings_app._diagnostics_threads), 0)
+
+    def test_app_exec_returning_normally_still_runs_the_production_shutdown_helper(self):
+        fake_classes = self._fake_classes(root_objects=[object()], exec_return=0)
+        with mock.patch.object(qt_settings_app, "_load_qt_classes", return_value=fake_classes):
+            with mock.patch.object(
+                qt_settings_app,
+                "_shutdown_diagnostics_workers",
+                wraps=qt_settings_app._shutdown_diagnostics_workers,
+            ) as shutdown_spy:
+                exit_code = qt_settings_app.run_settings_window()
+
+        self.assertEqual(exit_code, 0)
+        shutdown_spy.assert_called()
+        self.assertEqual(len(qt_settings_app._diagnostics_threads), 0)
+
+
 # Loads the REAL qml/main.qml (not a stand-in snippet) with QT_QPA_
 # PLATFORM=offscreen and reports rootObjects()/warnings/window size as
 # JSON - run in an isolated subprocess (see OffscreenQmlLoadTests below for
@@ -823,14 +998,16 @@ import faulthandler
 import json
 import sys
 
-# XRBM-034: this is the only real-QML-loading probe in this file that
-# connects engine.warnings to a Python callback, and Windows CI (XRBM-033
-# REPLAN evidence: run 29680568984) isolated it as the only one of the four
-# real-QML probes that crashes 0xC0000005 at process exit - the other
-# three (DirectSave/Contrast/Hotspot), which do no such connect(), all pass
-# on the same Windows runner. faulthandler.enable() costs nothing on the
-# passing path; if the fix below is ever wrong, it dumps a native traceback
-# to stderr instead of leaving only a bare exit code to guess from again.
+# XRBM-034's "engine.warnings connected to a Python callback" theory for
+# this probe's 0xC0000005 was disproven by real Windows CI evidence
+# (XRBM-034 REPLAN, run 29681031609): a named-callback connect()/
+# disconnect() pair still crashed AFTER printing STAGE:connected/loaded/
+# disconnected, and faulthandler's own thread dump showed the actual crash
+# thread deep inside ble_transport_winrt.discover_candidates()'s WinRT
+# await - a background DiagnosticsController worker this script starts
+# below, not anything QML-warnings-related. faulthandler.enable() is kept
+# (XRBM-035 In-scope item 6) purely as cheap forensic insurance if this
+# script ever fails again - it costs nothing on the passing path.
 faulthandler.enable()
 
 from ovb_rc003 import qt_settings_app as m
@@ -859,17 +1036,7 @@ qml_dir = m._qml_directory()
 engine.addImportPath(str(qml_dir))
 
 warnings = []
-
-
-def _collect_warnings(ws):
-    warnings.extend(ws)
-
-
-# A named, referenceable callback (not an anonymous lambda) is required so
-# disconnect() below can identify the exact same connection to sever - each
-# `lambda ...` expression is its own distinct object, so the previous code
-# had no way to ever disconnect what it connected.
-engine.warnings.connect(_collect_warnings)
+engine.warnings.connect(lambda ws: warnings.extend(ws))
 print("STAGE:connected", file=sys.stderr, flush=True)
 
 engine.load(QUrl.fromLocalFile(str(qml_dir / "main.qml")))
@@ -883,15 +1050,18 @@ result = {
     "height": root_objects[0].property("height") if root_objects else None,
 }
 
-# XRBM-034: warning collection is complete (the `result` dict above already
-# captured everything the callback appended during engine.load()) - sever
-# the Qt-signal-to-Python-callback connection explicitly here, while both
-# the engine and the callback are still fully alive, rather than leaving a
-# live cross-language connection for the engine's eventual destruction (at
-# an otherwise-unspecified point relative to interpreter shutdown) to deal
-# with implicitly.
-engine.warnings.disconnect(_collect_warnings)
-print("STAGE:disconnected", file=sys.stderr, flush=True)
+# XRBM-035: the real fast-close gate this probe exists to be - calls the
+# EXACT SAME production shutdown helper run_settings_window() calls right
+# after app.exec() returns (see qt_settings_app.py's module docstring and
+# _shutdown_diagnostics_workers()'s own docstring), while every Qt/Python
+# object built above (including the DiagnosticsController constructed by
+# _load_qt_classes()/DiagnosticsController(...) above, which already
+# started a REAL background BLE-discovery worker thread in its own
+# __init__ - never faked/skipped here) is still fully alive. This is what
+# actually reproduces the real settings-window-closes-quickly race, and
+# actually exercises the fix for it.
+m._shutdown_diagnostics_workers()
+print("STAGE:shutdown", file=sys.stderr, flush=True)
 
 print(json.dumps(result))
 """
@@ -935,74 +1105,47 @@ class OffscreenQmlLoadTests(unittest.TestCase):
         self.assertGreater(data["height"], 0)
 
 
-class QmlLoadProbeWarningsCallbackLifecycleTests(unittest.TestCase):
-    """XRBM-034: a source-level, PySide6-independent regression guard for
-    ``_QML_LOAD_PROBE_SCRIPT``'s ``engine.warnings`` callback lifecycle -
-    the exact hazard XRBM-033 round 2's Windows CI isolated (this was the
-    only real-QML-loading probe connecting the signal to a Python callback,
-    and the only one that crashed 0xC0000005 at process exit; see the probe
-    script's own comments above). An AST check (never touches Qt, matching
-    ``DiagnosticsShutdownOrderingTests``/``OffscreenQmlLoadTests`` above)
-    guards against a future edit silently reintroducing an anonymous lambda
-    (which cannot be disconnect()d by reference) or dropping/reordering the
-    disconnect() call ahead of when warning collection is actually done.
+class QmlLoadProbeCallsProductionShutdownHelperTests(unittest.TestCase):
+    """XRBM-035: a source-level, PySide6-independent regression guard
+    (never touches Qt, matching ``DiagnosticsShutdownOrderingTests``/
+    ``OffscreenQmlLoadTests`` above) that ``_QML_LOAD_PROBE_SCRIPT`` calls
+    the SAME production shutdown helper ``run_settings_window()`` calls
+    right after ``app.exec()`` returns - see that function and
+    ``_shutdown_diagnostics_workers()``'s own docstrings. Without this, a
+    future edit could silently start relying on this module's ``atexit``
+    hook alone again (the exact contract a real Windows CI crash already
+    disproved), or start mocking/skipping the real BLE discovery this probe
+    deliberately still exercises - defeating the whole point of this being
+    a REAL fast-close race reproduction rather than a stand-in for one.
     """
 
-    def test_warnings_connect_and_disconnect_use_the_same_named_callback_after_collection(self):
-        import ast
+    def test_probe_script_calls_the_production_shutdown_helper_before_printing_result(self):
+        self.assertIn("m._shutdown_diagnostics_workers()", _QML_LOAD_PROBE_SCRIPT)
+        shutdown_index = _QML_LOAD_PROBE_SCRIPT.index("m._shutdown_diagnostics_workers()")
+        result_index = _QML_LOAD_PROBE_SCRIPT.index("result = {")
+        print_index = _QML_LOAD_PROBE_SCRIPT.index("print(json.dumps(result))")
 
-        body = ast.parse(_QML_LOAD_PROBE_SCRIPT).body
-
-        def _signal_call(attr):
-            for index, node in enumerate(body):
-                if (
-                    isinstance(node, ast.Expr)
-                    and isinstance(node.value, ast.Call)
-                    and isinstance(node.value.func, ast.Attribute)
-                    and node.value.func.attr == attr
-                ):
-                    (arg,) = node.value.args
-                    self.assertIsInstance(
-                        arg,
-                        ast.Name,
-                        f"engine.warnings.{attr}() must pass a named callback, not a lambda",
-                    )
-                    return index, arg.id
-            self.fail(f"probe script no longer calls engine.warnings.{attr}()")
-
-        connect_index, connect_name = _signal_call("connect")
-        disconnect_index, disconnect_name = _signal_call("disconnect")
-
-        result_index = None
-        for index, node in enumerate(body):
-            if (
-                isinstance(node, ast.Assign)
-                and len(node.targets) == 1
-                and isinstance(node.targets[0], ast.Name)
-                and node.targets[0].id == "result"
-            ):
-                result_index = index
-                break
-        self.assertIsNotNone(
-            result_index, "probe script no longer builds a `result` dict from collected warnings"
-        )
-
-        self.assertEqual(
-            connect_name,
-            disconnect_name,
-            "engine.warnings.connect() and .disconnect() must reference the same named callback object",
-        )
-        self.assertLess(
-            connect_index,
-            disconnect_index,
-            "engine.warnings.disconnect() must come after connect()",
-        )
         self.assertLess(
             result_index,
-            disconnect_index,
-            "engine.warnings.disconnect() must run after warning collection "
-            "(the `result` dict) is complete, not before",
+            shutdown_index,
+            "the probe must build its `result` dict from the real QML load "
+            "BEFORE requesting diagnostics-worker shutdown",
         )
+        self.assertLess(
+            shutdown_index,
+            print_index,
+            "the production shutdown helper must run before the probe prints "
+            "its result and exits, mirroring run_settings_window() calling "
+            "it before returning",
+        )
+
+    def test_probe_script_never_mocks_or_skips_the_real_diagnostics_controller(self):
+        # This probe's entire value is exercising the REAL background BLE
+        # discovery a real DiagnosticsController.__init__() starts - a
+        # future "just make CI green" edit replacing it with a fake/no-op
+        # would silently stop testing the actual crash this task fixed.
+        self.assertIn("DiagnosticsController(controller,", _QML_LOAD_PROBE_SCRIPT)
+        self.assertNotIn("mock", _QML_LOAD_PROBE_SCRIPT.lower())
 
 
 # Real mouse clicks and real key events via QTest, delivered through the

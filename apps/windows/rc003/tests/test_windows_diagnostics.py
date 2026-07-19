@@ -1,4 +1,13 @@
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
 import unittest
+from unittest import mock
 
 from ovb_rc003 import (
     audio_output,
@@ -206,6 +215,40 @@ class BleCandidateCheckTests(unittest.TestCase):
         self.assertNotIn("AA:BB:CC:DD:EE:FF", result.detail)
         self.assertTrue(result.detail.strip())
         self.assertIn("WinRT", result.detail)
+
+    def test_cancellation_is_reported_honestly_without_leaking_an_identifier(self):
+        # XRBM-035: cancellation (settings window closing) or a timeout is
+        # neither a real hardware/config problem NOR an "unexpected error" -
+        # it is an honest "did not complete", and (like every other branch
+        # in this method) must never leak a device identifier.
+        def _raise():
+            raise diag.BleDiscoveryCancelledError("BLE discovery cancelled")
+
+        result = diag.check_ble_candidate(discover=_raise)
+
+        self.assertEqual(result.status, diag.CheckStatus.FAIL)
+        self.assertEqual(result.group, diag.CheckGroup.VOICE_BRIDGE)
+        self.assertIn("取消", result.detail)
+        self.assertIn("重新检测", result.detail)
+
+    def test_subprocess_shutdown_unconfirmed_is_a_distinct_honest_failure(self):
+        # XRBM-035 RETRY 1 P1: distinct from a normal cancellation - this
+        # means even a forceful kill could not be confirmed, so this must
+        # never be worded the same as a routine "please retry" cancel/
+        # timeout, and must never leak an identifier either.
+        def _raise_unconfirmed():
+            raise diag.BleDiscoverySubprocessShutdownUnconfirmedError("could not confirm exit")
+
+        def _raise_cancelled():
+            raise diag.BleDiscoveryCancelledError("cancelled")
+
+        unconfirmed_result = diag.check_ble_candidate(discover=_raise_unconfirmed)
+        cancelled_result = diag.check_ble_candidate(discover=_raise_cancelled)
+
+        self.assertEqual(unconfirmed_result.status, diag.CheckStatus.FAIL)
+        self.assertEqual(unconfirmed_result.group, diag.CheckGroup.VOICE_BRIDGE)
+        self.assertIn("未能确认", unconfirmed_result.detail)
+        self.assertNotEqual(unconfirmed_result.detail, cancelled_result.detail)
 
     def test_unexpected_exception_message_never_echoes_the_raw_exception_text(self):
         # RETRY 3 (independent review): an unexpected exception surfacing
@@ -415,6 +458,730 @@ class RunDiagnosticsIsolationTests(unittest.TestCase):
         self.assertEqual(report.get("dictation").status, diag.CheckStatus.FAIL)
         # Untouched checks are unaffected.
         self.assertIsNotNone(report.get("ble_candidate"))
+
+
+class BuildBleDiagnosticsSubprocessCommandTests(unittest.TestCase):
+    """XRBM-035 RETRY 1 In-scope item 1: the command-contract test the
+    review required - both ways this package is ever run, and the
+    result-path argument that replaced the (broken in a real frozen
+    ``console=False`` build - see windows_diagnostics.py's own "IPC
+    transport" comment) stdout contract.
+    """
+
+    def test_source_mode_uses_dash_m_ovb_rc003(self):
+        command = diag.build_ble_diagnostics_subprocess_command(
+            "/tmp/result.json", frozen=False, executable="/usr/bin/python3"
+        )
+        self.assertEqual(
+            command,
+            ["/usr/bin/python3", "-m", "ovb_rc003", diag.BLE_DIAGNOSTICS_SUBPROCESS_FLAG, "/tmp/result.json"],
+        )
+
+    def test_frozen_mode_reinvokes_the_exe_directly_with_no_dash_m(self):
+        command = diag.build_ble_diagnostics_subprocess_command(
+            "/tmp/result.json",
+            frozen=True,
+            executable=r"C:\Program Files\OpenVoiceBridgeRC003\OpenVoiceBridgeRC003.exe",
+        )
+        self.assertEqual(
+            command,
+            [
+                r"C:\Program Files\OpenVoiceBridgeRC003\OpenVoiceBridgeRC003.exe",
+                diag.BLE_DIAGNOSTICS_SUBPROCESS_FLAG,
+                "/tmp/result.json",
+            ],
+        )
+        self.assertNotIn("-m", command)
+
+    def test_result_path_is_always_the_final_argument(self):
+        for frozen in (True, False):
+            command = diag.build_ble_diagnostics_subprocess_command(
+                "/some/result/path.json", frozen=frozen, executable="exe"
+            )
+            self.assertEqual(command[-1], "/some/result/path.json")
+
+    def test_real_defaults_reflect_this_process_not_hardcoded_values(self):
+        command = diag.build_ble_diagnostics_subprocess_command("/tmp/r.json")
+        self.assertEqual(command[0], sys.executable)
+
+
+class SanitizeVerdictPayloadTests(unittest.TestCase):
+    """XRBM-035 RETRY 1 P2/D: the strict-allow-list parser is the ONLY place
+    raw, untrusted result-file content is allowed to influence this
+    process - every test here proves something OUTSIDE the exact expected
+    shape becomes ``ERROR``, never a fabricated success or an unbounded
+    allocation.
+    """
+
+    def test_accepts_every_real_non_ambiguous_verdict(self):
+        for verdict in ("single_match", "no_candidate", "winrt_unavailable", "error"):
+            with self.subTest(verdict=verdict):
+                result = diag._sanitize_verdict_payload({"verdict": verdict})
+                self.assertEqual(result.verdict.value, verdict)
+                self.assertIsNone(result.count)
+
+    def test_accepts_a_well_formed_ambiguous_verdict(self):
+        result = diag._sanitize_verdict_payload({"verdict": "ambiguous", "count": 3})
+        self.assertEqual(result.verdict, diag.BleDiagnosticsVerdict.AMBIGUOUS)
+        self.assertEqual(result.count, 3)
+
+    def test_rejects_non_dict_content(self):
+        for bad in (None, "single_match", 42, ["single_match"]):
+            with self.subTest(bad=bad):
+                result = diag._sanitize_verdict_payload(bad)
+                self.assertEqual(result.verdict, diag.BleDiagnosticsVerdict.ERROR)
+
+    def test_rejects_an_unknown_verdict_string(self):
+        result = diag._sanitize_verdict_payload({"verdict": "totally_made_up"})
+        self.assertEqual(result.verdict, diag.BleDiagnosticsVerdict.ERROR)
+
+    def test_rejects_extra_keys_on_a_simple_verdict(self):
+        result = diag._sanitize_verdict_payload(
+            {"verdict": "single_match", "extra": "should not be here"}
+        )
+        self.assertEqual(result.verdict, diag.BleDiagnosticsVerdict.ERROR)
+
+    def test_rejects_extra_keys_on_an_ambiguous_verdict(self):
+        result = diag._sanitize_verdict_payload(
+            {"verdict": "ambiguous", "count": 3, "device_name": "should never appear"}
+        )
+        self.assertEqual(result.verdict, diag.BleDiagnosticsVerdict.ERROR)
+
+    def test_rejects_ambiguous_missing_count(self):
+        result = diag._sanitize_verdict_payload({"verdict": "ambiguous"})
+        self.assertEqual(result.verdict, diag.BleDiagnosticsVerdict.ERROR)
+
+    def test_rejects_non_integer_count(self):
+        for bad_count in ("3", 3.0, None, [3]):
+            with self.subTest(bad_count=bad_count):
+                result = diag._sanitize_verdict_payload({"verdict": "ambiguous", "count": bad_count})
+                self.assertEqual(result.verdict, diag.BleDiagnosticsVerdict.ERROR)
+
+    def test_rejects_a_bool_count_despite_bool_being_an_int_subclass(self):
+        result = diag._sanitize_verdict_payload({"verdict": "ambiguous", "count": True})
+        self.assertEqual(result.verdict, diag.BleDiagnosticsVerdict.ERROR)
+
+    def test_rejects_count_below_two(self):
+        for bad_count in (-1, 0, 1):
+            with self.subTest(bad_count=bad_count):
+                result = diag._sanitize_verdict_payload({"verdict": "ambiguous", "count": bad_count})
+                self.assertEqual(result.verdict, diag.BleDiagnosticsVerdict.ERROR)
+
+    def test_rejects_an_implausibly_large_count(self):
+        result = diag._sanitize_verdict_payload(
+            {"verdict": "ambiguous", "count": diag._MAX_PLAUSIBLE_AMBIGUOUS_COUNT + 1}
+        )
+        self.assertEqual(result.verdict, diag.BleDiagnosticsVerdict.ERROR)
+
+    def test_accepts_the_maximum_plausible_count(self):
+        result = diag._sanitize_verdict_payload(
+            {"verdict": "ambiguous", "count": diag._MAX_PLAUSIBLE_AMBIGUOUS_COUNT}
+        )
+        self.assertEqual(result.verdict, diag.BleDiagnosticsVerdict.AMBIGUOUS)
+        self.assertEqual(result.count, diag._MAX_PLAUSIBLE_AMBIGUOUS_COUNT)
+
+
+class ReadSubprocessVerdictTests(unittest.TestCase):
+    """Parent-side file read+parse, exercised against a REAL temp file (not
+    a mock) - nonzero exit codes and missing/malformed files must never be
+    trusted, even if a stray file happens to exist.
+    """
+
+    def setUp(self):
+        self._tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _write(self, content: str) -> str:
+        path = os.path.join(self._tmpdir, "verdict.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(content)
+        return path
+
+    def test_nonzero_returncode_is_error_even_if_the_file_has_valid_content(self):
+        path = self._write(json.dumps({"verdict": "single_match"}))
+        result = diag._read_subprocess_verdict(path, returncode=1)
+        self.assertEqual(result.verdict, diag.BleDiagnosticsVerdict.ERROR)
+
+    def test_missing_file_is_error(self):
+        missing_path = os.path.join(self._tmpdir, "does-not-exist.json")
+        result = diag._read_subprocess_verdict(missing_path, returncode=0)
+        self.assertEqual(result.verdict, diag.BleDiagnosticsVerdict.ERROR)
+
+    def test_malformed_json_is_error(self):
+        path = self._write("{not valid json")
+        result = diag._read_subprocess_verdict(path, returncode=0)
+        self.assertEqual(result.verdict, diag.BleDiagnosticsVerdict.ERROR)
+
+    def test_valid_content_with_zero_returncode_is_accepted(self):
+        path = self._write(json.dumps({"verdict": "no_candidate"}))
+        result = diag._read_subprocess_verdict(path, returncode=0)
+        self.assertEqual(result.verdict, diag.BleDiagnosticsVerdict.NO_CANDIDATE)
+
+
+class BleDiagnosticsSubprocessEntrypointTests(unittest.TestCase):
+    """XRBM-035 RETRY 1 In-scope item 6/F: exercises
+    ``run_ble_diagnostics_subprocess_entrypoint()`` DIRECTLY, in-process
+    (never spawning a real subprocess) - the fast, deterministic layer that
+    proves the child-side contract itself, independent of process
+    spawning/termination (covered separately below).
+    """
+
+    def setUp(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self._result_path = os.path.join(self._tmpdir, "verdict.json")
+
+    def tearDown(self):
+
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _read_result(self) -> dict:
+        with open(self._result_path, "r", encoding="utf-8") as handle:
+            return json.loads(handle.read())
+
+    def test_missing_result_path_fails_closed_without_writing_anything(self):
+        exit_code = diag.run_ble_diagnostics_subprocess_entrypoint(None)
+        self.assertEqual(exit_code, 1)
+        self.assertFalse(os.path.exists(self._result_path))
+
+    def test_empty_result_path_fails_closed(self):
+        exit_code = diag.run_ble_diagnostics_subprocess_entrypoint("")
+        self.assertEqual(exit_code, 1)
+
+    def test_never_touches_stdout_stderr_stdin_even_when_all_three_are_none(self):
+        # XRBM-035 RETRY 1 In-scope item 6/F - the exact condition a real
+        # PyInstaller console=False build produces (see windows_diagnostics.
+        # py's own "IPC transport" comment and the PyInstaller docs it
+        # cites). If this function ever touched any of these three, this
+        # test would raise AttributeError before reaching the assertions
+        # below - proving it instead of merely asserting it.
+        with mock.patch.object(sys, "stdout", None), mock.patch.object(
+            sys, "stderr", None
+        ), mock.patch.object(sys, "stdin", None):
+            exit_code = diag.run_ble_diagnostics_subprocess_entrypoint(self._result_path)
+
+        self.assertEqual(exit_code, 0)
+        # This host has no real winrt packages installed - the real,
+        # unmocked ble_transport_winrt.discover_candidates() call this
+        # entrypoint makes (In-scope item 5: never mock/skip real BLE
+        # inside this function itself) therefore genuinely raises
+        # WinRTUnavailableError, exactly as it would on a non-Windows CI
+        # runner - proving the whole real call chain still works with a
+        # None stdout/stderr/stdin, not just a mocked-out shortcut.
+        self.assertEqual(self._read_result(), {"verdict": "winrt_unavailable"})
+
+    def test_no_candidate_verdict_is_written_for_an_empty_candidate_list(self):
+        async def _empty_discover():
+            return []
+
+        with mock.patch.object(ble_transport_winrt, "discover_candidates", _empty_discover):
+            exit_code = diag.run_ble_diagnostics_subprocess_entrypoint(self._result_path)
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(self._read_result(), {"verdict": "no_candidate"})
+
+    def test_single_match_verdict_never_includes_the_real_device_name(self):
+        secret_name = "小米蓝牙遥控器 2 Pro"
+
+        async def _one_match():
+            return [identity.RC003Candidate(name=secret_name, hardware_match=True)]
+
+        with mock.patch.object(ble_transport_winrt, "discover_candidates", _one_match):
+            exit_code = diag.run_ble_diagnostics_subprocess_entrypoint(self._result_path)
+
+        self.assertEqual(exit_code, 0)
+        payload = self._read_result()
+        self.assertEqual(payload, {"verdict": "single_match"})
+        with open(self._result_path, "r", encoding="utf-8") as handle:
+            raw_text = handle.read()
+        self.assertNotIn(secret_name, raw_text)
+
+    def test_ambiguous_verdict_carries_only_a_count_never_names(self):
+        async def _two_matches():
+            return [
+                identity.RC003Candidate(name="Mi RC", hardware_match=False),
+                identity.RC003Candidate(name="MI RC", hardware_match=False),
+            ]
+
+        with mock.patch.object(ble_transport_winrt, "discover_candidates", _two_matches):
+            exit_code = diag.run_ble_diagnostics_subprocess_entrypoint(self._result_path)
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(self._read_result(), {"verdict": "ambiguous", "count": 2})
+
+    def test_unexpected_exception_becomes_the_sanitized_error_verdict(self):
+        async def _raise():
+            raise RuntimeError("boom with a secret AA:BB:CC:DD:EE:FF inside")
+
+        with mock.patch.object(ble_transport_winrt, "discover_candidates", _raise):
+            exit_code = diag.run_ble_diagnostics_subprocess_entrypoint(self._result_path)
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(self._read_result(), {"verdict": "error"})
+        with open(self._result_path, "r", encoding="utf-8") as handle:
+            raw_text = handle.read()
+        self.assertNotIn("AA:BB:CC:DD:EE:FF", raw_text)
+        self.assertNotIn("boom", raw_text)
+
+
+class _FakeProc:
+    """A minimal ``Popen``-like double for exercising
+    ``_attempt_termination_step()``'s own process-control exception
+    handling in isolation from any real OS process/timing (XRBM-035 RETRY
+    1, Codex red evidence: ``terminate()``/``kill()``/``wait()`` each
+    raising ``PermissionError``, and ``poll()`` also raising after
+    ``wait()`` already did) - real subprocesses cannot be made to raise
+    these deterministically, so a real ``Popen`` is the wrong tool for
+    these specific tests (see ``RunBleDiagnosticsSubprocessTests`` below
+    for the REAL-process coverage of the happy/race/escalation paths this
+    class does not attempt to duplicate).
+    """
+
+    def __init__(
+        self,
+        *,
+        terminate_raises=None,
+        kill_raises=None,
+        wait_raises=None,
+        poll_raises=None,
+        poll_returns=None,
+    ):
+        self.terminate_calls = 0
+        self.kill_calls = 0
+        self.wait_calls = 0
+        self.poll_calls = 0
+        self._terminate_raises = terminate_raises
+        self._kill_raises = kill_raises
+        self._wait_raises = wait_raises
+        self._poll_raises = poll_raises
+        self._poll_returns = poll_returns
+
+    def terminate(self):
+        self.terminate_calls += 1
+        if self._terminate_raises is not None:
+            raise self._terminate_raises
+
+    def kill(self):
+        self.kill_calls += 1
+        if self._kill_raises is not None:
+            raise self._kill_raises
+
+    def wait(self, timeout=None):
+        self.wait_calls += 1
+        if self._wait_raises is not None:
+            raise self._wait_raises
+
+    def poll(self):
+        self.poll_calls += 1
+        if self._poll_raises is not None:
+            raise self._poll_raises
+        return self._poll_returns
+
+
+class AttemptTerminationStepTests(unittest.TestCase):
+    """XRBM-035 RETRY 1: deterministic, process-free coverage of
+    ``_attempt_termination_step()``'s own exception handling - every
+    process-control call (``terminate()``/``kill()``/``wait()``/
+    ``poll()``) can independently raise an ``OSError``
+    (``PermissionError`` was the exact case Codex's own probe reproduced),
+    and none of them may ever escape this function as a raw,
+    undifferentiated ``OSError`` - only a real ``wait()``/``poll()``
+    observation of the process having actually exited may ever return
+    True; anything this function cannot confirm returns False.
+    """
+
+    def test_terminate_raising_still_confirms_via_a_successful_wait(self):
+        # A race: terminate() failed (e.g. PermissionError), but the
+        # process happens to have already exited on its own by the time
+        # wait() is called - wait() succeeding is a REAL confirmation and
+        # must still return True, not be treated as a terminate() failure.
+        proc = _FakeProc(terminate_raises=PermissionError("denied"))
+        result = diag._attempt_termination_step(proc, proc.terminate, 1.0)
+        self.assertTrue(result)
+        self.assertEqual(proc.wait_calls, 1)
+
+    def test_wait_raising_falls_back_to_a_successful_poll_confirmation(self):
+        # wait() itself fails, but poll() independently observes the
+        # process has a real exit status - still a genuine confirmation.
+        proc = _FakeProc(wait_raises=PermissionError("denied"), poll_returns=0)
+        result = diag._attempt_termination_step(proc, proc.terminate, 1.0)
+        self.assertTrue(result)
+        self.assertEqual(proc.poll_calls, 1)
+
+    def test_wait_raising_and_poll_showing_still_running_returns_false(self):
+        proc = _FakeProc(wait_raises=PermissionError("denied"), poll_returns=None)
+        result = diag._attempt_termination_step(proc, proc.terminate, 1.0)
+        self.assertFalse(result)
+
+    def test_wait_raising_and_poll_also_raising_returns_false_not_raise(self):
+        # XRBM-035 RETRY 1 (this round's own fix): poll() is not trusted to
+        # never raise either - a second raw OSError from the poll()
+        # fallback must never escape this function; it is just another
+        # "cannot confirm" outcome.
+        proc = _FakeProc(
+            wait_raises=PermissionError("wait denied"),
+            poll_raises=OSError("poll denied too"),
+        )
+        result = diag._attempt_termination_step(proc, proc.terminate, 1.0)
+        self.assertFalse(result)
+
+    def test_kill_raising_still_confirms_via_a_successful_wait(self):
+        proc = _FakeProc(kill_raises=PermissionError("denied"))
+        result = diag._attempt_termination_step(proc, proc.kill, 1.0)
+        self.assertTrue(result)
+
+    def test_timeout_expired_returns_false_without_touching_poll(self):
+        proc = _FakeProc(wait_raises=subprocess.TimeoutExpired(cmd="x", timeout=1.0))
+        result = diag._attempt_termination_step(proc, proc.terminate, 1.0)
+        self.assertFalse(result)
+        self.assertEqual(proc.poll_calls, 0)
+
+    def test_every_failure_path_stays_bounded_no_retry_loop(self):
+        # None of the OSError fallback branches may loop/sleep - each is a
+        # single wait() plus at most one poll() call, never retried.
+        proc = _FakeProc(
+            wait_raises=PermissionError("denied"), poll_raises=OSError("denied too")
+        )
+        started = time.monotonic()
+        diag._attempt_termination_step(proc, proc.terminate, 1.0)
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 0.5)
+        self.assertEqual(proc.wait_calls, 1)
+        self.assertEqual(proc.poll_calls, 1)
+
+    def test_full_escalation_confirms_via_wait_after_terminate_and_kill_both_raise(self):
+        # Full _terminate_and_confirm_exit() escalation: terminate() raises,
+        # its wait() times out (still running), kill() ALSO raises, but the
+        # kill-step wait() succeeds - a real race-confirmed death after the
+        # forceful step, even though both signal calls themselves failed.
+        proc = _FakeProc(
+            terminate_raises=PermissionError("denied"),
+            kill_raises=PermissionError("denied too"),
+        )
+        # First wait() (after terminate) times out; second wait() (after
+        # kill) succeeds - simulate via a stateful override.
+        wait_calls = {"n": 0}
+
+        def _wait(timeout=None):
+            wait_calls["n"] += 1
+            if wait_calls["n"] == 1:
+                raise subprocess.TimeoutExpired(cmd="x", timeout=timeout)
+            return None
+
+        proc.wait = _wait
+        result = diag._terminate_and_confirm_exit(proc, terminate_wait=0.1, kill_wait=0.1)
+        self.assertTrue(result)
+        self.assertEqual(proc.terminate_calls, 1)
+        self.assertEqual(proc.kill_calls, 1)
+
+
+def _spawn_ovb_rc003(*args: str) -> "list[str]":
+    env = dict(os.environ)
+    repo_src = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
+    env["PYTHONPATH"] = repo_src
+    return [sys.executable, "-m", "ovb_rc003", *args], env
+
+
+class RunBleDiagnosticsSubprocessTests(unittest.TestCase):
+    """XRBM-035 RETRY 1: exercises ``_run_ble_diagnostics_subprocess()``
+    against REAL OS child processes (never mocked ``Popen`` internals for
+    the termination logic itself) - this is the layer the independent
+    review's own red probe (an uncooperative-cancel child still hanging
+    after 2 seconds) targeted, so it is proven here against a genuine
+    process, not merely asserted.
+    """
+
+    def test_a_well_behaved_child_reports_its_verdict_and_is_never_killed(self):
+        tmpdir = tempfile.mkdtemp()
+        try:
+            result_path = os.path.join(tmpdir, "verdict.json")
+            command, env = _spawn_ovb_rc003(
+                diag.BLE_DIAGNOSTICS_SUBPROCESS_FLAG, result_path
+            )
+            popen = lambda cmd, **kwargs: subprocess.Popen(cmd, env=env, **kwargs)  # noqa: E731
+            result = diag._run_ble_diagnostics_subprocess(
+                command,
+                result_path=result_path,
+                cancel_event=threading.Event(),
+                timeout=30.0,
+                popen=popen,
+            )
+            # This host has no real winrt packages - the real child process
+            # genuinely reaches WinRTUnavailableError on its own, proving
+            # the full real spawn -> real discovery attempt -> real file
+            # write -> parent read round-trip, not a mocked stand-in.
+            self.assertEqual(result.verdict, diag.BleDiagnosticsVerdict.WINRT_UNAVAILABLE)
+        finally:
+
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_cancel_event_already_set_never_spawns_a_process_at_all(self):
+        spawn_calls = []
+
+        def _counting_popen(cmd, **kwargs):
+            spawn_calls.append(cmd)
+            raise AssertionError("must never spawn once cancel_event is already set")
+
+        cancel_event = threading.Event()
+        cancel_event.set()
+        with self.assertRaises(diag.BleDiscoveryCancelledError):
+            diag._run_ble_diagnostics_subprocess(
+                ["irrelevant"],
+                result_path="/irrelevant",
+                cancel_event=cancel_event,
+                timeout=5.0,
+                popen=_counting_popen,
+            )
+        self.assertEqual(spawn_calls, [])
+
+    def test_a_hanging_child_is_terminated_and_confirmed_dead_within_bound(self):
+        # A genuine child process that never exits on its own (no
+        # cooperative-cancel handling of any kind - this is the exact
+        # "uncooperative cancel" shape the independent review's own red
+        # probe used) - proves the parent's terminate()+wait() escalation
+        # actually confirms a REAL OS process's death, not merely that
+        # Python-level bookkeeping believes it did.
+        script = "import time\ntime.sleep(120)\n"
+        process_holder = {}
+
+        def _spawning_popen(cmd, **kwargs):
+            proc = subprocess.Popen([sys.executable, "-c", script], **kwargs)
+            process_holder["proc"] = proc
+            return proc
+
+        cancel_event = threading.Event()
+        started = time.monotonic()
+        with self.assertRaises(diag.BleDiscoveryCancelledError):
+            diag._run_ble_diagnostics_subprocess(
+                ["irrelevant - replaced by _spawning_popen above"],
+                result_path="/irrelevant",
+                cancel_event=cancel_event,
+                timeout=0.2,
+                poll_interval=0.05,
+                terminate_wait=1.0,
+                kill_wait=1.0,
+                popen=_spawning_popen,
+            )
+        elapsed = time.monotonic() - started
+
+        self.assertLess(
+            elapsed, 5.0, "termination must be bounded, not left to the 120s child sleep"
+        )
+        proc = process_holder["proc"]
+        # Independently confirm the OS process is REALLY gone (not just
+        # that _run_ble_diagnostics_subprocess() believes so) - poll()
+        # after a confirmed wait() must report a real exit status.
+        self.assertIsNotNone(proc.poll(), "the child process must actually be dead")
+
+    @unittest.skipIf(sys.platform == "win32", "SIGTERM-ignoring is a POSIX-only scenario")
+    def test_a_child_that_ignores_sigterm_is_escalated_to_sigkill_and_confirmed_dead(self):
+        # The exact "uncooperative cancel" scenario the independent review
+        # cited (its own probe: a child that survives a first cancellation
+        # attempt and is still alive 2 seconds later) - only reproducible
+        # on POSIX, where a process can choose to ignore SIGTERM (Popen.
+        # terminate()) but never SIGKILL (Popen.kill()). On Windows both
+        # calls map to the same TerminateProcess() (see _terminate_and_
+        # confirm_exit()'s own docstring), so there is nothing to ignore -
+        # this is exactly why _terminate_and_confirm_exit() (exercised
+        # directly here) always escalates rather than trusting terminate()
+        # alone.
+        script = (
+            "import signal, time\n"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            "time.sleep(120)\n"
+        )
+        proc = subprocess.Popen([sys.executable, "-c", script])
+        try:
+            time.sleep(0.2)  # let the child install its SIGTERM handler
+            started = time.monotonic()
+            confirmed_dead = diag._terminate_and_confirm_exit(
+                proc, terminate_wait=0.5, kill_wait=2.0
+            )
+            elapsed = time.monotonic() - started
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5.0)
+
+        self.assertTrue(
+            confirmed_dead, "kill() must have been confirmed even though terminate() was ignored"
+        )
+        self.assertGreater(
+            elapsed, 0.5, "must actually have waited out terminate_wait before escalating to kill()"
+        )
+        self.assertLess(elapsed, 3.0, "the whole escalation must still be bounded")
+        self.assertIsNotNone(proc.poll(), "the child process must actually be dead")
+
+    @unittest.skipIf(sys.platform == "win32", "SIGTERM-ignoring is a POSIX-only scenario")
+    def test_run_ble_diagnostics_subprocess_kills_an_uncooperative_child_end_to_end(self):
+        # Same scenario, but driven through the full
+        # _run_ble_diagnostics_subprocess() orchestration (poll loop +
+        # cancel_event + escalation), matching the independent review's own
+        # red probe shape more closely than the lower-level test above.
+        script = (
+            "import signal, time\n"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            "time.sleep(120)\n"
+        )
+
+        def _spawning_popen(cmd, **kwargs):
+            return subprocess.Popen([sys.executable, "-c", script], **kwargs)
+
+        cancel_event = threading.Event()
+        threading.Timer(0.1, cancel_event.set).start()
+
+        started = time.monotonic()
+        with self.assertRaises(diag.BleDiscoveryCancelledError):
+            diag._run_ble_diagnostics_subprocess(
+                ["irrelevant - _spawning_popen ignores this"],
+                result_path="/irrelevant",
+                cancel_event=cancel_event,
+                timeout=30.0,
+                poll_interval=0.05,
+                terminate_wait=1.0,
+                kill_wait=2.0,
+                popen=_spawning_popen,
+            )
+        elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 5.0, "the whole kill sequence must still be bounded")
+
+
+class DiscoverBleCandidatesSyncTests(unittest.TestCase):
+    """End-to-end coverage of ``_discover_ble_candidates_sync()`` - the real
+    production default ``check_ble_candidate()`` uses - including the temp
+    result-directory's own cleanup contract (XRBM-035 RETRY 1 P3).
+    """
+
+    def test_real_subprocess_round_trip_raises_winrt_unavailable_on_this_host(self):
+        # No mocking anywhere in this test - a REAL subprocess is spawned
+        # (via the real build_ble_diagnostics_subprocess_command()), and
+        # this host genuinely has no winrt packages installed, so this
+        # proves the entire real pipeline (spawn, write, confirm-exit,
+        # read, sanitize, reconstruct) end-to-end.
+        with self.assertRaises(ble_transport_winrt.WinRTUnavailableError):
+            diag._discover_ble_candidates_sync(timeout=30.0)
+
+    def test_result_directory_is_always_removed_afterward(self):
+        created_dirs = []
+        real_mkdtemp = tempfile.mkdtemp
+
+        def _tracking_mkdtemp(*args, **kwargs):
+            path = real_mkdtemp(*args, **kwargs)
+            created_dirs.append(path)
+            return path
+
+        with mock.patch.object(tempfile, "mkdtemp", _tracking_mkdtemp):
+            with self.assertRaises(ble_transport_winrt.WinRTUnavailableError):
+                diag._discover_ble_candidates_sync(timeout=30.0)
+
+        self.assertEqual(len(created_dirs), 1)
+        self.assertFalse(os.path.exists(created_dirs[0]), "the temp result directory must be cleaned up")
+
+    def test_a_cleanup_failure_other_than_missing_propagates_never_silently_discarded(self):
+        # XRBM-035 RETRY 1 P3: only FileNotFoundError may ever be ignored
+        # during cleanup - anything else (simulated here) must be visible,
+        # either to a caller or, as here, directly to the test - never a
+        # bare `except Exception: pass`. This is also this file's "unrelated
+        # original exception still loses to a cleanup failure" case (the
+        # real original here is WinRTUnavailableError, from this host
+        # genuinely having no winrt packages) - see the two more explicit,
+        # mocked-original tests below for the full narrowing this priority
+        # rule is scoped to.
+
+        def _raise_permission_error(path):
+            raise PermissionError("simulated: child still held this file open")
+
+        with mock.patch.object(shutil, "rmtree", _raise_permission_error):
+            with self.assertRaises(PermissionError):
+                diag._discover_ble_candidates_sync(timeout=30.0)
+
+    def test_unconfirmed_shutdown_survives_a_cleanup_failure_with_it_chained_as_cause(self):
+        # XRBM-035 RETRY 1: the ONE narrow case where the original exception
+        # must win over a cleanup failure - BleDiscoverySubprocessShutdownUnconfirmedError
+        # is the one honest "the subprocess might still be alive" signal
+        # this whole design exists to surface; a cleanup failure on top of
+        # it must never silently replace it with a plain OSError.
+        def _raise_unconfirmed(*args, **kwargs):
+            raise diag.BleDiscoverySubprocessShutdownUnconfirmedError("could not confirm exit")
+
+        def _raise_permission_error(path):
+            raise PermissionError("simulated: cleanup also failed")
+
+        with mock.patch.object(diag, "_run_ble_diagnostics_subprocess", _raise_unconfirmed):
+            with mock.patch.object(shutil, "rmtree", _raise_permission_error):
+                with self.assertRaises(
+                    diag.BleDiscoverySubprocessShutdownUnconfirmedError
+                ) as ctx:
+                    diag._discover_ble_candidates_sync(timeout=30.0)
+
+        self.assertIsInstance(ctx.exception.__cause__, PermissionError)
+        self.assertIsInstance(ctx.exception.__context__, PermissionError)
+
+    def test_an_unrelated_original_exception_still_loses_to_a_cleanup_failure(self):
+        # Confirms the narrowing is exact: this priority rule applies ONLY
+        # to BleDiscoverySubprocessShutdownUnconfirmedError - every OTHER
+        # original exception (here BleDiscoveryCancelledError, a routine
+        # cancel/timeout outcome, not "might still be alive") keeps this
+        # module's pre-existing "a cleanup failure must still propagate,
+        # never be silently discarded" contract, even though it means the
+        # cleanup OSError is what a caller ultimately sees, not the
+        # original exception.
+        def _raise_cancelled(*args, **kwargs):
+            raise diag.BleDiscoveryCancelledError("cancelled")
+
+        def _raise_permission_error(path):
+            raise PermissionError("simulated: cleanup also failed")
+
+        with mock.patch.object(diag, "_run_ble_diagnostics_subprocess", _raise_cancelled):
+            with mock.patch.object(shutil, "rmtree", _raise_permission_error):
+                with self.assertRaises(PermissionError):
+                    diag._discover_ble_candidates_sync(timeout=30.0)
+
+
+class RunDiagnosticsStopsAfterCancellationTests(unittest.TestCase):
+    """XRBM-035 RETRY 1 P1 #2: once cancel_event becomes set, run_diagnostics()
+    must not continue running checks after whichever one just completed -
+    continuing would only prolong worker shutdown for a report that is about
+    to be discarded unemitted anyway.
+    """
+
+    def test_no_cancel_event_still_runs_all_six_checks(self):
+        report = diag.run_diagnostics()
+        self.assertEqual(len(report.checks), 6)
+
+    def test_stops_immediately_after_the_check_during_which_cancellation_was_observed(self):
+        cancel_event = threading.Event()
+
+        def _fake_check_ble_candidate(*, discover):
+            # Simulates cancel_event becoming set WHILE the BLE check was
+            # running (e.g. the settings window started closing during
+            # discovery) - discover() itself is never called here since
+            # this replaces check_ble_candidate() entirely.
+            cancel_event.set()
+            return diag.CheckResult(
+                "ble_candidate",
+                "已配对的 RC003 (BLE)",
+                diag.CheckGroup.VOICE_BRIDGE,
+                diag.CheckStatus.FAIL,
+                "cancelled",
+            )
+
+        with mock.patch.object(diag, "check_ble_candidate", side_effect=_fake_check_ble_candidate):
+            report = diag.run_diagnostics(cancel_event=cancel_event)
+
+        ids = [c.check_id for c in report.checks]
+        self.assertEqual(ids, ["os_version", "raw_input", "ble_candidate"])
+
+    def test_cancel_event_already_set_before_the_first_check_stops_after_just_one(self):
+        cancel_event = threading.Event()
+        cancel_event.set()
+
+        report = diag.run_diagnostics(cancel_event=cancel_event)
+
+        self.assertEqual([c.check_id for c in report.checks], ["os_version"])
 
 
 if __name__ == "__main__":
