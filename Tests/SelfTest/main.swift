@@ -361,6 +361,104 @@ check(
     "test tone safety gate rejects missing device, active RC003 voice stream, or in-flight playback"
 )
 
+check(
+    AudioRecoveryPolicy.action(for: .engineConfigurationChanged) == .inspectBoundOutput &&
+        AudioRecoveryPolicy.action(for: .devicesChanged) == .inspectBoundOutput &&
+        AudioRecoveryPolicy.action(for: .defaultOutputChanged) == .restartBoundOutput &&
+        AudioRecoveryPolicy.action(for: .streamUnavailable) == .restartBoundOutput,
+    "audio recovery reasons select the expected action"
+)
+
+check(
+    AudioRecoveryPolicy.merge(.defaultOutputChanged, with: .devicesChanged) ==
+        .defaultOutputChanged &&
+        AudioRecoveryPolicy.merge(.streamUnavailable, with: .engineConfigurationChanged) ==
+        .streamUnavailable &&
+        AudioRecoveryPolicy.merge(.devicesChanged, with: .defaultOutputChanged) ==
+        .defaultOutputChanged,
+    "forced audio recovery reasons are not downgraded"
+)
+
+var audioRecoveryState = AudioRecoveryState()
+let initialAudioRecovery = audioRecoveryState.request(delay: 0.3)
+let duplicateAudioRecovery = audioRecoveryState.request(delay: 0)
+check(
+    initialAudioRecovery != nil &&
+        duplicateAudioRecovery == nil &&
+        audioRecoveryState.pendingGeneration == initialAudioRecovery?.generation,
+    "audio recovery requests remain single-flight"
+)
+if let initialAudioRecovery {
+    _ = audioRecoveryState.begin(generation: initialAudioRecovery.generation)
+}
+let firstAudioRetry = audioRecoveryState.retry()
+for _ in 0..<10 {
+    _ = audioRecoveryState.request(delay: 0)
+}
+if let firstAudioRetry {
+    _ = audioRecoveryState.begin(generation: firstAudioRetry.generation)
+}
+let secondAudioRetry = audioRecoveryState.retry()
+if let secondAudioRetry {
+    _ = audioRecoveryState.begin(generation: secondAudioRetry.generation)
+}
+let thirdAudioRetry = audioRecoveryState.retry()
+if let thirdAudioRetry {
+    _ = audioRecoveryState.begin(generation: thirdAudioRetry.generation)
+}
+let exhaustedAudioRetry = audioRecoveryState.retry()
+check(
+    firstAudioRetry?.attempt == 1 &&
+        firstAudioRetry?.delay == 0.25 &&
+        secondAudioRetry?.attempt == 2 &&
+        secondAudioRetry?.delay == 0.5 &&
+        thirdAudioRetry?.attempt == 3 &&
+        thirdAudioRetry?.delay == 1.0 &&
+        exhaustedAudioRetry == nil,
+    "audio recovery backoff is bounded and survives duplicate failures"
+)
+var cancelledAudioRecoveryState = AudioRecoveryState()
+let staleAudioRecovery = cancelledAudioRecoveryState.request(delay: 0.3)
+cancelledAudioRecoveryState.cancel()
+check(
+    staleAudioRecovery.map {
+        !cancelledAudioRecoveryState.begin(generation: $0.generation)
+    } ?? false,
+    "audio recovery cancellation rejects stale work"
+)
+var successfulAudioRecoveryState = AudioRecoveryState()
+let successfulInitialRecovery = successfulAudioRecoveryState.request(delay: 0)
+if let successfulInitialRecovery {
+    _ = successfulAudioRecoveryState.begin(generation: successfulInitialRecovery.generation)
+}
+let successfulFirstRetry = successfulAudioRecoveryState.retry()
+if let successfulFirstRetry {
+    _ = successfulAudioRecoveryState.begin(generation: successfulFirstRetry.generation)
+}
+successfulAudioRecoveryState.succeeded()
+check(
+    successfulFirstRetry?.attempt == 1 &&
+        successfulAudioRecoveryState.retryIndex == 0 &&
+        !successfulAudioRecoveryState.isRecovering,
+    "successful audio recovery resets retry state"
+)
+var urgentAudioRecoveryState = AudioRecoveryState()
+let delayedAudioRecovery = urgentAudioRecoveryState.request(delay: 0.5)
+let urgentAudioRecovery = urgentAudioRecoveryState.expedite(delay: 0)
+check(
+    delayedAudioRecovery != nil &&
+        (urgentAudioRecovery?.generation ?? 0) > (delayedAudioRecovery?.generation ?? 0) &&
+        urgentAudioRecovery?.attempt == delayedAudioRecovery?.attempt &&
+        urgentAudioRecovery?.delay == 0 &&
+        !(delayedAudioRecovery.map {
+            urgentAudioRecoveryState.begin(generation: $0.generation)
+        } ?? true) &&
+        (urgentAudioRecovery.map {
+            urgentAudioRecoveryState.begin(generation: $0.generation)
+        } ?? false),
+    "urgent audio recovery supersedes delayed work"
+)
+
 let suiteName = "XiaomiRemoteBridgeMacSelfTest.\(UUID().uuidString)"
 if let defaults = UserDefaults(suiteName: suiteName) {
     let saved = try JSONEncoder().encode([
