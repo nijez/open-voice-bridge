@@ -97,6 +97,8 @@ enum CoreAudioDeviceCatalog {
 final class VirtualAudioOutput {
     private var engine: AVAudioEngine?
     private var player: AVAudioPlayerNode?
+    private var configurationObserver: NSObjectProtocol?
+    private var engineGeneration: UInt64 = 0
     private let sourceFormat = AVAudioFormat(
         commonFormat: .pcmFormatFloat32,
         sampleRate: 16_000,
@@ -106,6 +108,7 @@ final class VirtualAudioOutput {
 
     private(set) var selectedDevice: AudioDeviceInfo?
     private(set) var status = "未选择语音输出设备"
+    var onConfigurationChange: (() -> Void)?
 
     @discardableResult
     func configure(deviceUID: String) -> Bool {
@@ -149,6 +152,10 @@ final class VirtualAudioOutput {
             self.engine = engine
             self.player = player
             selectedDevice = device
+            installConfigurationObserver(
+                for: engine,
+                generation: engineGeneration
+            )
             status = "语音输出：\(device.name)"
             AppLogger.shared.write("AUDIO READY device=\(device.name)")
             return true
@@ -160,7 +167,81 @@ final class VirtualAudioOutput {
     }
 
     var isReadyForTestTone: Bool {
-        selectedDevice != nil && engine?.isRunning == true
+        guard let selectedDevice else { return false }
+        return isConfigured(deviceUID: selectedDevice.uid)
+    }
+
+    func isConfigured(
+        deviceUID: String,
+        expectedDeviceID: AudioDeviceID? = nil
+    ) -> Bool {
+        guard !deviceUID.isEmpty,
+              let selectedDevice,
+              selectedDevice.uid == deviceUID,
+              let engine,
+              engine.isRunning,
+              let player,
+              player.isPlaying,
+              let outputUnit = engine.outputNode.audioUnit,
+              let currentDeviceID = currentDeviceID(for: outputUnit)
+        else { return false }
+        let expectedDeviceID = expectedDeviceID ?? selectedDevice.id
+        return selectedDevice.id == expectedDeviceID &&
+            currentDeviceID == expectedDeviceID
+    }
+
+    /// Configuration changes can leave AVAudioEngine stopped while its nodes remain
+    /// attached. If the output unit is still bound to the selected device, restarting
+    /// this graph avoids an unnecessary CurrentDevice mutation and its notifications.
+    @discardableResult
+    func restoreIfBound(
+        deviceUID: String,
+        expectedDeviceID: AudioDeviceID? = nil,
+        forceRestart: Bool = false
+    ) -> Bool {
+        guard !deviceUID.isEmpty,
+              let selectedDevice,
+              selectedDevice.uid == deviceUID,
+              let engine,
+              let player,
+              let outputUnit = engine.outputNode.audioUnit,
+              let boundDeviceID = currentDeviceID(for: outputUnit)
+        else { return false }
+
+        let expectedDeviceID = expectedDeviceID ?? selectedDevice.id
+        guard selectedDevice.id == expectedDeviceID,
+              boundDeviceID == expectedDeviceID
+        else { return false }
+
+        if engine.isRunning && !forceRestart {
+            if !player.isPlaying {
+                player.play()
+            }
+            return player.isPlaying
+        }
+
+        if engine.isRunning {
+            engine.stop()
+        }
+        do {
+            engine.prepare()
+            try engine.start()
+            player.play()
+            guard engine.isRunning,
+                  player.isPlaying,
+                  currentDeviceID(for: outputUnit) == expectedDeviceID
+            else { return false }
+            status = "语音输出：\(selectedDevice.name)"
+            AppLogger.shared.write(
+                "AUDIO ENGINE restarted device=\(selectedDevice.name)"
+            )
+            return true
+        } catch {
+            AppLogger.shared.write(
+                "AUDIO ENGINE restart_failed error=\(error.localizedDescription)"
+            )
+            return false
+        }
     }
 
     /// Schedules the test tone and reports actual playback completion via `scheduleBuffer`'s
@@ -208,7 +289,11 @@ final class VirtualAudioOutput {
 
     @discardableResult
     func enqueue(samples: [Int16]) -> Bool {
-        guard let player, engine?.isRunning == true, let buffer = makeBuffer(samples: samples) else {
+        guard let player,
+              player.isPlaying,
+              engine?.isRunning == true,
+              let buffer = makeBuffer(samples: samples)
+        else {
             return false
         }
         player.scheduleBuffer(buffer)
@@ -220,17 +305,61 @@ final class VirtualAudioOutput {
     }
 
     private func flushPlayer() {
-        guard let player, engine?.isRunning == true else { return }
+        guard let player else { return }
         player.stop()
         player.reset()
-        player.play()
+        if engine?.isRunning == true {
+            player.play()
+        }
     }
 
     func stop() {
+        engineGeneration &+= 1
+        if let configurationObserver {
+            NotificationCenter.default.removeObserver(configurationObserver)
+            self.configurationObserver = nil
+        }
         player?.stop()
         engine?.stop()
         player = nil
         engine = nil
         selectedDevice = nil
+    }
+
+    private func installConfigurationObserver(
+        for engine: AVAudioEngine,
+        generation: UInt64
+    ) {
+        configurationObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: engine,
+            queue: nil
+        ) { [weak self, weak engine] _ in
+            // Configuration changes may arrive off-main. Serialize engine recovery
+            // with the rest of the app model on the main queue.
+            DispatchQueue.main.async { [weak self, weak engine] in
+                guard let self,
+                      let engine,
+                      self.engineGeneration == generation,
+                      self.engine === engine
+                else { return }
+                AppLogger.shared.write("AUDIO ENGINE configuration_changed")
+                self.onConfigurationChange?()
+            }
+        }
+    }
+
+    private func currentDeviceID(for outputUnit: AudioUnit) -> AudioDeviceID? {
+        var deviceID = AudioDeviceID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        let result = AudioUnitGetProperty(
+            outputUnit,
+            kAudioOutputUnitProperty_CurrentDevice,
+            kAudioUnitScope_Global,
+            0,
+            &deviceID,
+            &size
+        )
+        return result == noErr ? deviceID : nil
     }
 }

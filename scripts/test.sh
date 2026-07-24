@@ -14,6 +14,7 @@ xcrun swiftc \
   "$ROOT/Sources/XiaomiRemoteBridgeMac/VoiceFunctionKeyLatch.swift" \
   "$ROOT/Sources/XiaomiRemoteBridgeMac/RemoteVoiceFunctionMapper.swift" \
   "$ROOT/Sources/XiaomiRemoteBridgeMac/AppLogger.swift" \
+  "$ROOT/Sources/XiaomiRemoteBridgeMac/AudioRecovery.swift" \
   "$ROOT/Sources/XiaomiRemoteBridgeMac/TestTone.swift" \
   "$ROOT/Tests/SelfTest/main.swift" \
   -o "$OUTPUT"
