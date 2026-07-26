@@ -354,14 +354,19 @@ class SettingsControllerTests(unittest.TestCase):
 
     def test_device_selector_defaults_to_rc003_for_existing_users(self):
         controller, _ = self._make_controller()
-        self.assertEqual(controller.selectedDeviceIndex, 0)
+        self.assertEqual(
+            controller.selectedDeviceIndex,
+            controller._DEVICE_ORDER.index(device_catalog.RC003_ID),
+        )
         self.assertTrue(controller.isRc003Device)
         self.assertFalse(controller.isDjiMic2Device)
         self.assertEqual(controller.mappingPageTitle, "按键映射")
 
     def test_selecting_dji_changes_the_ui_contract_and_persists(self):
         controller, _ = self._make_controller()
-        controller.selectedDeviceIndex = 1
+        controller.selectedDeviceIndex = controller._DEVICE_ORDER.index(
+            device_catalog.DJI_MIC_2_ID
+        )
         self.assertFalse(controller.isRc003Device)
         self.assertTrue(controller.isDjiMic2Device)
         self.assertEqual(controller.mappingPageTitle, "设备控制")
@@ -380,7 +385,9 @@ class SettingsControllerTests(unittest.TestCase):
 
     def test_dji_save_and_launch_never_starts_the_rc003_bridge(self):
         controller, _ = self._make_controller()
-        controller.selectedDeviceIndex = 1
+        controller.selectedDeviceIndex = controller._DEVICE_ORDER.index(
+            device_catalog.DJI_MIC_2_ID
+        )
         with mock.patch.object(bridge_launcher, "launch_bridge") as fake_launch:
             controller.saveAndLaunch()
         fake_launch.assert_not_called()
@@ -1132,7 +1139,7 @@ QQuickStyle.setStyle("Basic")
 app = QGuiApplication.instance() or QGuiApplication([])
 model = ButtonMappingModel()
 controller = SettingsController(model)
-controller.selectedDeviceIndex = 1
+controller.selectedDeviceIndex = controller._DEVICE_ORDER.index(m.device_catalog.DJI_MIC_2_ID)
 diagnostics_controller = DiagnosticsController(controller, m.config.config_root())
 qmlRegisterSingletonInstance(SettingsController, "OvbRc003Settings", 1, 0, "SettingsController", controller)
 qmlRegisterSingletonInstance(ButtonMappingModel, "OvbRc003Settings", 1, 0, "ButtonMappingModel", model)
@@ -1163,7 +1170,7 @@ result = {
     "control_names": [row["name"] for row in controller.djiControlRows],
 }
 m._shutdown_diagnostics_workers()
-print(json.dumps(result, ensure_ascii=False))
+print(json.dumps(result))
 """
 
 
