@@ -90,6 +90,7 @@ def _dry_run() -> int:
         bridge_launcher,
         config,
         connection_supervisor,
+        device_catalog,
         device_profile,
         frida_compat,
         hid_identity,
@@ -132,7 +133,18 @@ def _run_bridge() -> None:
     exit rather than silently disappearing.
     """
 
-    from . import app, single_instance
+    from . import app, config, device_catalog, single_instance
+
+    selected_device_id = device_catalog.normalize_device_id(
+        config.load_config(config.config_path()).get("selected_device_profile")
+    )
+    if selected_device_id == device_catalog.DJI_MIC_2_ID:
+        single_instance.show_bridge_startup_blocked_notice(
+            "当前设备是 DJI Mic 2。它由 Windows 作为系统录音输入使用，不需要也不会启动 "
+            "RC003 BLE/HID/ATVV 桥。请在 Open Voice Bridge 设置中检查录音端点。",
+            title="Open Voice Bridge",
+        )
+        return
 
     try:
         with single_instance.BridgeInstanceGuard():

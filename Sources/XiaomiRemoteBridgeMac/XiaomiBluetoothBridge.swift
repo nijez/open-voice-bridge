@@ -27,6 +27,7 @@ enum BluetoothBridgeState: Equatable {
 
 protocol XiaomiBluetoothBridgeDelegate: AnyObject {
     func bluetoothBridge(_ bridge: XiaomiBluetoothBridge, didChange state: BluetoothBridgeState)
+    func bluetoothBridge(_ bridge: XiaomiBluetoothBridge, didDetectModelNumber modelNumber: String)
     func bluetoothBridgeDidStartVoice(_ bridge: XiaomiBluetoothBridge)
     func bluetoothBridgeDidStopVoice(_ bridge: XiaomiBluetoothBridge)
     func bluetoothBridge(_ bridge: XiaomiBluetoothBridge, didDecode samples: [Int16])
@@ -108,11 +109,13 @@ final class XiaomiBluetoothBridge: NSObject {
     private var transmitCharacteristic: CBCharacteristic?
     private var audioCharacteristic: CBCharacteristic?
     private var controlCharacteristic: CBCharacteristic?
+    private var modelNumberCharacteristic: CBCharacteristic?
     private var subscribedUUIDs = Set<CBUUID>()
     private var reconnectWorkItem: DispatchWorkItem?
     private var initializationTimeoutWorkItem: DispatchWorkItem?
     private var capabilitiesRequested = false
     private var capabilitiesConfirmed = false
+    private var modelConfirmation = XiaomiModelConfirmationGate()
     private var requestedReconnectDelay: TimeInterval?
     private var generationCounter: UInt64 = 0
     private var lifecycle: BluetoothLifecyclePhase = .stopped
@@ -125,11 +128,18 @@ final class XiaomiBluetoothBridge: NSObject {
     private var microphoneOpened = false
     private var sessionID: UInt8 = 0
     private var lastStopAt: Date?
+    /// Runtime voice gate. When false (bridge runtime disabled) the BLE link and
+    /// its state observation stay live, but the remote must not open the
+    /// microphone, start/continue a stream, or push audio. Independent of the BLE
+    /// connection lifecycle.
+    private var voiceBridgingEnabled = true
 
     private let serviceUUID = CBUUID(string: ATVVProtocol.serviceUUID)
     private let transmitUUID = CBUUID(string: ATVVProtocol.transmitUUID)
     private let audioUUID = CBUUID(string: ATVVProtocol.audioUUID)
     private let controlUUID = CBUUID(string: ATVVProtocol.controlUUID)
+    private let deviceInformationServiceUUID = CBUUID(string: "180A")
+    private let modelNumberUUID = CBUUID(string: "2A24")
 
     private(set) var state: BluetoothBridgeState = .stopped {
         didSet {
@@ -164,6 +174,29 @@ final class XiaomiBluetoothBridge: NSObject {
         }
         resetSession()
         state = .stopped
+    }
+
+    /// Enables/disables the voice bridging path without touching the BLE
+    /// connection. Disabling immediately closes the microphone (if open), stops any
+    /// active stream (which notifies the delegate so the Fn latch, arbiter, and
+    /// audio output are cleaned up), and drops any partial decode state. The link
+    /// stays connected so a re-enable is instant.
+    func setVoiceBridgingEnabled(_ enabled: Bool) {
+        guard enabled != voiceBridgingEnabled else { return }
+        voiceBridgingEnabled = enabled
+        if enabled {
+            AppLogger.shared.write("ATVV VOICE_GATE enabled")
+            return
+        }
+        closeMicrophoneIfNeeded()
+        if streaming {
+            stopStreaming()
+        } else {
+            accumulator.reset()
+            pendingSync = nil
+            decoder.reset()
+        }
+        AppLogger.shared.write("ATVV VOICE_GATE disabled")
     }
 
     func reconnectNow() {
@@ -257,11 +290,13 @@ final class XiaomiBluetoothBridge: NSObject {
         transmitCharacteristic = nil
         audioCharacteristic = nil
         controlCharacteristic = nil
+        modelNumberCharacteristic = nil
         subscribedUUIDs.removeAll()
         initializationTimeoutWorkItem?.cancel()
         initializationTimeoutWorkItem = nil
         capabilitiesRequested = false
         capabilitiesConfirmed = false
+        modelConfirmation.reset()
         capabilities = Self.defaultCapabilities
         resetSession()
     }
@@ -381,6 +416,21 @@ final class XiaomiBluetoothBridge: NSObject {
         AppLogger.shared.write("ATVV CAPABILITIES requested name=\(peripheral.name ?? "MI RC")")
     }
 
+    private func completeInitializationIfPossible() {
+        guard let generation = currentGeneration(),
+              lifecycle.acceptsCapabilities(generation: generation),
+              capabilitiesConfirmed,
+              modelConfirmation.isConfirmed,
+              let peripheral
+        else { return }
+        initializationTimeoutWorkItem?.cancel()
+        initializationTimeoutWorkItem = nil
+        lifecycle = .ready(generation)
+        settings.peripheralIdentifier = peripheral.identifier
+        state = .ready(peripheral.name ?? "MI RC")
+        AppLogger.shared.write("BLE READY name=\(peripheral.name ?? "MI RC") model_confirmed=true")
+    }
+
     private func handleControl(_ data: Data) {
         let bytes = Array(data)
         guard let opcode = bytes.first,
@@ -406,15 +456,12 @@ final class XiaomiBluetoothBridge: NSObject {
                 return
             }
             capabilitiesConfirmed = true
-            initializationTimeoutWorkItem?.cancel()
-            initializationTimeoutWorkItem = nil
-            lifecycle = .ready(generation)
-            if let peripheral {
-                settings.peripheralIdentifier = peripheral.identifier
-                state = .ready(peripheral.name ?? "MI RC")
-                AppLogger.shared.write("BLE READY name=\(peripheral.name ?? "MI RC")")
-            }
+            completeInitializationIfPossible()
         case 0x08:
+            guard ATVVVoiceBridgeGate.allowsVoice(bridgingEnabled: voiceBridgingEnabled) else {
+                AppLogger.shared.write("ATVV MIC_OPEN ignored_bridging_disabled")
+                return
+            }
             guard ATVVSessionGate.canOpenMicrophone(
                 phase: lifecycle,
                 generation: generation,
@@ -431,6 +478,10 @@ final class XiaomiBluetoothBridge: NSObject {
             microphoneOpened = true
             AppLogger.shared.write("ATVV MIC_OPEN request")
         case 0x04:
+            guard ATVVVoiceBridgeGate.allowsVoice(bridgingEnabled: voiceBridgingEnabled) else {
+                AppLogger.shared.write("ATVV STREAM_START ignored_bridging_disabled")
+                return
+            }
             guard ATVVSessionGate.canOpenMicrophone(
                 phase: lifecycle,
                 generation: generation,
@@ -494,6 +545,10 @@ final class XiaomiBluetoothBridge: NSObject {
     }
 
     private func handleAudio(_ data: Data) {
+        guard ATVVVoiceBridgeGate.allowsVoice(bridgingEnabled: voiceBridgingEnabled) else {
+            AppLogger.shared.write("ATVV AUDIO ignored_bridging_disabled")
+            return
+        }
         guard let generation = currentGeneration(),
               ATVVSessionGate.canOpenMicrophone(
                 phase: lifecycle,
@@ -607,7 +662,7 @@ extension XiaomiBluetoothBridge: CBCentralManagerDelegate {
         lifecycle = .discovering(generation)
         state = .discovering
         startInitializationTimeout(generation: generation)
-        peripheral.discoverServices([serviceUUID])
+        peripheral.discoverServices([serviceUUID, deviceInformationServiceUUID])
         AppLogger.shared.write("BLE CONNECTED name=\(peripheral.name ?? "unknown")")
     }
 
@@ -680,6 +735,13 @@ extension XiaomiBluetoothBridge {
             scheduleReconnect(discardCachedIdentity: true)
             return
         }
+        guard let deviceInformationService = peripheral.services?.first(
+            where: { $0.uuid == deviceInformationServiceUUID }
+        ) else {
+            failInitialization("遥控器未提供可验证的型号信息")
+            return
+        }
+        peripheral.discoverCharacteristics([modelNumberUUID], for: deviceInformationService)
         guard let service = peripheral.services?.first(where: { $0.uuid == serviceUUID }) else {
             state = .failed("遥控器未提供 ATVV 语音服务")
             scheduleReconnect(discardCachedIdentity: true)
@@ -699,9 +761,25 @@ extension XiaomiBluetoothBridge {
     ) {
         guard shouldRun,
               isCurrent(peripheral),
-              currentGeneration() == generation,
-              lifecycle.acceptsInitializationCallback(generation: generation)
+              currentGeneration() == generation
         else { return }
+        if service.uuid == deviceInformationServiceUUID {
+            guard lifecycle.acceptsModelDiscovery(generation: generation) else { return }
+            if let error {
+                failInitialization("读取遥控器型号失败：\(error.localizedDescription)")
+                return
+            }
+            guard let characteristic = service.characteristics?.first(
+                where: { $0.uuid == modelNumberUUID }
+            ) else {
+                failInitialization("遥控器未提供型号字段")
+                return
+            }
+            modelNumberCharacteristic = characteristic
+            peripheral.readValue(for: characteristic)
+            return
+        }
+        guard lifecycle.acceptsInitializationCallback(generation: generation) else { return }
         if let error {
             state = .failed("发现语音通道失败：\(error.localizedDescription)")
             scheduleReconnect(discardCachedIdentity: true)
@@ -770,13 +848,49 @@ extension XiaomiBluetoothBridge {
               isCurrent(peripheral),
               currentGeneration() == generation
         else { return }
-        guard error == nil, let data = characteristic.value else { return }
-        if characteristic.uuid == controlUUID {
+        if characteristic.uuid == modelNumberUUID {
+            guard lifecycle.acceptsModelValue(generation: generation) else {
+                AppLogger.shared.write("BLE MODEL ignored_stale_phase")
+                return
+            }
+            if let error {
+                failInitialization("读取遥控器型号失败：\(error.localizedDescription)")
+                return
+            }
+            guard let data = characteristic.value else {
+                failInitialization("遥控器型号为空")
+                return
+            }
+            let modelNumber = String(data: data, encoding: .utf8)?
+                .trimmingCharacters(in: .controlCharacters.union(.whitespacesAndNewlines))
+            guard let modelNumber, !modelNumber.isEmpty else {
+                failInitialization("遥控器型号无法识别")
+                return
+            }
+            guard XiaomiRemoteVariant.detected(fromModelNumber: modelNumber) != nil else {
+                AppLogger.shared.write("BLE MODEL unsupported=\(modelNumber)")
+                failInitialization("暂不支持遥控器型号 \(modelNumber)")
+                return
+            }
+            guard modelConfirmation.accept(modelNumber) != nil else {
+                AppLogger.shared.write(
+                    "BLE MODEL ignored_duplicate_or_conflict=\(modelNumber) " +
+                        "confirmed=\(modelConfirmation.modelNumber ?? "unknown")"
+                )
+                return
+            }
+            let confirmedModelNumber = modelConfirmation.modelNumber ?? modelNumber
+            AppLogger.shared.write("BLE MODEL detected=\(confirmedModelNumber)")
+            delegate?.bluetoothBridge(self, didDetectModelNumber: confirmedModelNumber)
+            completeInitializationIfPossible()
+        } else if characteristic.uuid == controlUUID {
+            guard error == nil, let data = characteristic.value else { return }
             guard lifecycle.acceptsCapabilities(generation: generation) ||
                     lifecycle.acceptsProtocolData(generation: generation)
             else { return }
             handleControl(data)
         } else if characteristic.uuid == audioUUID {
+            guard error == nil, let data = characteristic.value else { return }
             guard lifecycle.acceptsProtocolData(generation: generation) else { return }
             handleAudio(data)
         }

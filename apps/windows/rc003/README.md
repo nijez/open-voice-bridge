@@ -1,4 +1,4 @@
-# Open Voice Bridge · RC003 — Windows client (source/build candidate)
+# Open Voice Bridge — Windows client (RC003 build candidate + DJI Mic 2 input UI)
 
 > **Status: source/build candidate with a real Windows CI run, still not
 > real-device verified.** This directory builds and its pure-Python/
@@ -40,6 +40,14 @@ This is a Windows counterpart to this repository's macOS RC003 adapter
 and ATVV (Android TV Voice-over-BLE) voice bridging for the Xiaomi Bluetooth
 Remote 2 Pro / RC003. See the repository root `README.md` and
 `docs/ARCHITECTURE.md` for how this fits into the overall project.
+
+The settings window now has an explicit device selector. Selecting **Xiaomi
+RC003** keeps the existing bridge, virtual-output and 13-button mapping UI.
+Selecting **DJI Mic 2 (Pocket 3 kit transmitter)** switches to a separate
+system-recording-input page and never starts the RC003 BLE/HID/ATVV bridge.
+This does not claim that DJI transmitter controls are Windows buttons: the
+record, link and power controls remain read-only hardware descriptions until a
+real Windows input capture proves an independently mappable event.
 
 ## 中文安装与使用说明（源码/构建候选）
 
@@ -170,7 +178,19 @@ VB-CABLE 虚拟音频驱动"卡片会显示 CABLE Input/CABLE Output 两个端�
 
 ### 首次使用、停止/重启、卸载
 
-"打开设置并选择语音输出端点""确认按键映射""手动确认 Win+H"这几步在
+打开设置后，先在顶部“当前设备”选择实际连接的设备：
+
+- 选择“小米蓝牙语音遥控器 2 Pro（RC003）”时，继续使用桥接、CABLE
+  输出、语音热键和 13 键映射；
+- 选择“DJI Mic 2（Pocket 3 套装无线麦）”时，程序只检查 Windows
+  当前是否存在可用录音输入，并提供“打开 Windows 声音输入设置”。它不需要
+  VB-CABLE，也不会启动 RC003 桥。DJI 发射器的录音、连接和电源键目前只显示
+  官方硬件功能，不提供虚构的 Windows 自定义映射。
+
+设备选择会保存；原有配置没有该字段时默认保持 RC003，避免升级后改变旧用户
+行为。
+
+"打开设置并选择语音输出端点""确认按键映射""手动确认已配置的语音组合键"这几步在
 两种安装方式下目标一样，但具体怎么打开设置、怎么启动/停止/卸载不同
 ——安装器用户走 Start Menu，便携版用户在解压出的文件夹里用命令和任务
 管理器，分别在下面两个小节说明。
@@ -189,16 +209,16 @@ VB-CABLE 虚拟音频驱动"卡片会显示 CABLE Input/CABLE Output 两个端�
    **不代表已经与 RC003 建立连接**，实际连接、按键和语音状态仍以下一步
    的日志为准；
 3. 按一下普通按键（例如方向键、确定键）确认按键映射生效；
-4. 在测试遥控器麦克风键之前，先手动确认 Win+H 语音听写本身能正常工作：
+4. 在测试遥控器麦克风键之前，先在“按键映射”页确认麦克风键的组合键。新安装默认为较少冲突的 `Ctrl+Shift+U`；这个值必须与你的输入法语音快捷键相同。如果使用 Windows 系统语音键入，则改为 `Win+H`。然后先手动确认该组合键本身能正常工作：
    打开记事本（或任意可编辑文本框），把光标点进文本区域，按一次键盘上的
-   Win+H，确认 Windows 听写栏出现、说话后有文字被输入。这需要同时满足：
+   按下刚才配置的组合键，确认目标输入法的语音功能出现、说话后有文字被输入。这需要同时满足：
    光标确实停留在一个可编辑的文本输入框中（听写没有可输入目标时不会
    生效）；Windows 已启用"联机语音识别"（Windows 11：设置 → 隐私和安全性 → 语音；Windows 10：设置 → 隐私 → 语音，听写依赖联网的语音识别服务）；
    系统当前的麦克风输入设备选择的是
    `CABLE Output`（如果按上一节配置了 VB-CABLE）。手动测试通过后，光标
    保持在同一个可编辑文本框中，按住遥控器麦克风键说话，检查是否有文字
    被输入——同样要求语音输出/系统麦克风输入的方向配置与手动测试时一致，
-   否则语音会静默失败（按键仍然可用）；如果手动 Win+H 都无法工作，请先
+   否则语音会静默失败（按键仍然可用）；如果手动组合键都无法工作，请先
    解决那个问题，本程序不能让本来就不工作的系统听写变得可用；
 5. 需要时从 Start Menu 选择"停止 Open Voice Bridge · RC003"结束桥接，
    或从"设置 → 应用"/Start Menu 的"卸载"条目卸载（卸载会先自动停止
@@ -229,8 +249,8 @@ VB-CABLE 虚拟音频驱动"卡片会显示 CABLE Input/CABLE Output 两个端�
    显示未启动、已启动/运行中、已经在运行、启动异常或快速退出四种状态之
    一，"运行中"只说明进程本身存活，**不代表已经与 RC003 建立连接**；
 3. 按一下普通按键（例如方向键、确定键）确认按键映射生效；
-4. 手动确认 Win+H 语音听写的步骤和上面"安装器用户"一节完全相同（打开
-   记事本、光标点进可编辑文本框、按 Win+H、确认联机语音识别已启用、
+4. 手动确认已配置语音组合键的步骤和上面"安装器用户"一节完全相同（打开
+   记事本、光标点进可编辑文本框、按下已配置的组合键、确认语音识别已启用、
    确认系统麦克风输入选择的是 `CABLE Output`），这里不重复；
 5. **停止**：便携版没有停止脚本，也没有 Start Menu 条目——需要打开
    任务管理器（`Ctrl+Shift+Esc`），在"详细信息"标签页找到
@@ -258,7 +278,7 @@ VB-CABLE 虚拟音频驱动"卡片会显示 CABLE Input/CABLE Output 两个端�
 见下方"Privacy and provenance"与"Known gaps"两节（同一份内容，此处不重
 复）：不持久化保存真实蓝牙地址/HID 路径/设备令牌；本候选是对同一
 GPL-3.0 参考项目的只读、洁净室重新实现；设备配对/自动发现/重连、逐键
-真实行为、ATVV 语音延迟与音量、Win+H 实际效果均待真机核验。
+真实行为、ATVV 语音延迟与音量、用户配置的语音组合键实际效果均待真机核验。
 
 ## What this does
 
@@ -294,7 +314,8 @@ GPL-3.0 参考项目的只读、洁净室重新实现；设备配对/自动发�
   write failure also fails closed: the sink is discarded and a reconnect is
   requested, rather than logging indefinitely while the device keeps
   streaming into a broken sink.
-- Synthesizes the configured voice hotkey (default `Win+H`) in response to
+- Synthesizes the configured voice hotkey (default `Ctrl+Shift+U` for a new
+  installation; set it to `Win+H` for Windows Voice Typing) in response to
   the device's own mic-button press/release: in toggle mode, a key **tap**
   on mic-button-press (starting Windows' own Win+H dictation toggle) and
   another tap on the device's own `AUDIO_STOP` (turning that same toggle
@@ -480,7 +501,7 @@ nothing else about this candidate.
 
 | RC003 button | Windows action |
 | --- | --- |
-| Mic | Voice hotkey (default `Win+H`), tap (toggle) or hold edge per settings - **fixed, not editable** (see below) |
+| Mic | Voice lifecycle action; host chord defaults to `Ctrl+Shift+U` and is directly editable in this row |
 | Power | Escape |
 | Up / Down / Left / Right | Arrow keys |
 | OK | Enter |
@@ -490,18 +511,20 @@ nothing else about this candidate.
 | Menu | Shift+F10 |
 | TV | Alt+Esc |
 
-Every row except Mic is user-editable in the settings window
+Every ordinary mapping row is user-editable in the settings window
 (`python -m ovb_rc003 --settings`) and persisted to
-`%LOCALAPPDATA%\OpenVoiceBridge\RC003\key_bindings.json`. The Mic row is
-rendered read-only there, and `build_save_model()`/`config.load_key_bindings()`
-both force it back to the voice action regardless of what a saved file
+`%LOCALAPPDATA%\OpenVoiceBridge\RC003\key_bindings.json`. The Mic row keeps
+the physical button's action fixed as voice, while directly editing the host
+chord stored in `config.json`. `build_save_model()`/`config.load_key_bindings()`
+both force the button action back to voice regardless of what a saved file
 contains (XRBM-019, folded in from a XRBM-018 review round 2 product-
 contract finding): the physical mic button is always driven directly by
 the ATVV voice lifecycle - the runtime never consults a stored `mic`
 binding at all, so it must not be presented (or ever saved) as an ordinary,
 freely-editable key mapping. The voice hotkey text and toggle/hold trigger
-mode remain fully configurable in the same window, just not through the
-per-button mapping list.
+mode remain fully configurable in the same window. Existing installations
+retain their previously saved chord; only a config with no saved value receives
+the new `Ctrl+Shift+U` default.
 
 ## Architecture notes
 

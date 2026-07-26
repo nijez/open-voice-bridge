@@ -145,6 +145,7 @@ def _enumerate_endpoints(channel_count_key: str) -> List[AudioEndpoint]:
 # one endpoint the "select detected CABLE Input" action is allowed to persist.
 CABLE_INPUT_NAME = "CABLE Input"
 CABLE_OUTPUT_NAME = "CABLE Output"
+DJI_MIC_2_NAME_PREFIXES = ("DJI-MIC2", "DJI Mic 2", "DJI Mic2")
 
 
 def _matches_cable_endpoint(name: str, canonical: str) -> bool:
@@ -173,3 +174,28 @@ def is_cable_output_endpoint(name: str) -> bool:
     """True if ``name`` names VB-CABLE's recording ("CABLE Output") endpoint."""
 
     return _matches_cable_endpoint(name, CABLE_OUTPUT_NAME)
+
+
+def is_dji_mic_2_input_endpoint(name: str) -> bool:
+    """Matches DJI Mic 2 system recording endpoints without depending on or
+    exposing the per-device suffix Windows may append to the display name.
+    Localized Windows names commonly wrap the product token, for example
+    ``Microphone (DJI-MIC2-xxxx Hands-Free)``. Match a bounded token anywhere
+    in the endpoint name while still rejecting names such as ``DJI-MIC20``.
+    """
+
+    value = name.strip().casefold()
+    for raw_prefix in DJI_MIC_2_NAME_PREFIXES:
+        prefix = raw_prefix.casefold()
+        search_from = 0
+        while True:
+            index = value.find(prefix, search_from)
+            if index < 0:
+                break
+            end = index + len(prefix)
+            before_is_boundary = index == 0 or not value[index - 1].isalnum()
+            after_is_boundary = end == len(value) or not value[end].isalnum()
+            if before_is_boundary and after_is_boundary:
+                return True
+            search_from = index + 1
+    return False

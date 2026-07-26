@@ -24,7 +24,7 @@ import OvbRc003Settings 1.0
 
 ApplicationWindow {
     id: window
-    title: qsTr("Open Voice Bridge · RC003 设置")
+    title: qsTr("Open Voice Bridge 设置")
     width: 820
     height: 640
     minimumWidth: 720
@@ -76,7 +76,7 @@ ApplicationWindow {
                 Accessible.name: text
             }
             TabButton {
-                text: qsTr("按键")
+                text: SettingsController.mappingPageTitle
                 Accessible.name: text
             }
             TabButton {

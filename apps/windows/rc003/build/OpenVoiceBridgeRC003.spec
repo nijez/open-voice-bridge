@@ -23,6 +23,7 @@ SRC_ROOT = RC003_ROOT / "src"
 REPO_ROOT = RC003_ROOT.parents[2]
 REMOTE_PHOTO = REPO_ROOT / "Resources" / "RC003-remote-photo.png"
 QML_SOURCE_DIR = SRC_ROOT / "ovb_rc003" / "qml"
+DEVICE_PROFILES_DIR = REPO_ROOT / "device-profiles"
 # XRBM-031: build/fetch-vb-cable.ps1 (a REQUIRED step in both
 # build-candidate.ps1 and windows-rc003-ci.yml, run before this spec) writes
 # the hash-verified official VB-CABLE base package here. Bundled unmodified
@@ -53,6 +54,12 @@ if QML_SOURCE_DIR.is_dir():
     # sys._MEIPASS-relative reasoning as the photo above (see
     # resources.py's module docstring).
     datas.append((str(QML_SOURCE_DIR), "ovb_rc003_qml"))
+if DEVICE_PROFILES_DIR.is_dir():
+    # The exact repository JSON files are the runtime catalog on both
+    # platforms. The frozen loader reads them from
+    # sys._MEIPASS/device-profiles and fails closed if they are absent or
+    # invalid; no generated/hard-coded duplicate is bundled.
+    datas.append((str(DEVICE_PROFILES_DIR), "device-profiles"))
 if VB_CABLE_BUNDLE_ZIP.is_file():
     # Collected under "vb_cable_bundle" inside the COLLECT output, matching
     # vb_cable_bundle.py's _candidate_bundle_paths(), which looks under
@@ -67,6 +74,7 @@ if VB_CABLE_BUNDLE_ZIP.is_file():
 
 hiddenimports = [
     "ovb_rc003.app",
+    "ovb_rc003.device_catalog",  # XRBM-036: multi-device settings/runtime gate
     "ovb_rc003.settings_ui",
     "ovb_rc003.qt_settings_app",  # XRBM-030
     "ovb_rc003.windows_diagnostics",  # XRBM-031

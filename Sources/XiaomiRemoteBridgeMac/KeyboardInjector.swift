@@ -46,6 +46,8 @@ enum KeyboardInjector {
             postKey(code: 109, flags: .maskShift)
         case .appSwitcher:
             postKey(code: 48, flags: .maskCommand)
+        case .mouseRightClick:
+            return postRightClick()
         case .volumeUp:
             postSystemKey(type: 0)
         case .volumeDown:
@@ -69,6 +71,37 @@ enum KeyboardInjector {
         up.setIntegerValueField(.eventSourceUserData, value: syntheticEventMarker)
         down.post(tap: .cghidEventTap)
         up.post(tap: .cghidEventTap)
+    }
+
+    /// Posts a single real right-click (down + up) at the current mouse cursor
+    /// position. The cursor location is read from a null `CGEvent(source:)` — the
+    /// CoreGraphics event coordinate space — instead of `NSEvent.mouseLocation`,
+    /// whose bottom-left AppKit coordinates would land the click in the wrong place.
+    /// Any failure to build the event source, the location probe, or either mouse
+    /// event returns `false` so the HID path fails closed rather than faking success.
+    private static func postRightClick() -> Bool {
+        guard let source = CGEventSource(stateID: .hidSystemState),
+              let locationProbe = CGEvent(source: source)
+        else { return false }
+        let location = locationProbe.location
+        guard let down = CGEvent(
+                  mouseEventSource: source,
+                  mouseType: .rightMouseDown,
+                  mouseCursorPosition: location,
+                  mouseButton: .right
+              ),
+              let up = CGEvent(
+                  mouseEventSource: source,
+                  mouseType: .rightMouseUp,
+                  mouseCursorPosition: location,
+                  mouseButton: .right
+              )
+        else { return false }
+        down.setIntegerValueField(.eventSourceUserData, value: syntheticEventMarker)
+        up.setIntegerValueField(.eventSourceUserData, value: syntheticEventMarker)
+        down.post(tap: .cghidEventTap)
+        up.post(tap: .cghidEventTap)
+        return true
     }
 
     private static func postSystemKey(type: Int32) {

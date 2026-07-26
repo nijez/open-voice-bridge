@@ -357,6 +357,35 @@ class OutputEndpointResolutionCheckTests(unittest.TestCase):
         self.assertEqual(result.status, diag.CheckStatus.UNSUPPORTED)
 
 
+class DjiMic2InputCheckTests(unittest.TestCase):
+    def test_present_recording_endpoint_passes(self):
+        result = diag.check_dji_mic_2_input(
+            list_recording=lambda: [
+                audio_output.AudioEndpoint(
+                    name="DJI-MIC2-ABCDEF Hands-Free", host_api="Windows WASAPI"
+                )
+            ]
+        )
+        self.assertEqual(result.status, diag.CheckStatus.PASS)
+        self.assertEqual(result.group, diag.CheckGroup.EXTERNAL_MICROPHONE)
+        self.assertNotIn("ABCDEF", result.detail)
+
+    def test_pairing_without_recording_endpoint_fails(self):
+        result = diag.check_dji_mic_2_input(
+            list_recording=lambda: [audio_output.AudioEndpoint(name="Microphone Array")]
+        )
+        self.assertEqual(result.status, diag.CheckStatus.FAIL)
+        self.assertIn("已连接", result.detail)
+
+    def test_enumeration_failure_is_unsupported_without_exception_detail(self):
+        def _raise():
+            raise audio_output.AudioOutputUnavailableError("secret endpoint")
+
+        result = diag.check_dji_mic_2_input(list_recording=_raise)
+        self.assertEqual(result.status, diag.CheckStatus.UNSUPPORTED)
+        self.assertNotIn("secret endpoint", result.detail)
+
+
 class DictationCheckTests(unittest.TestCase):
     def test_always_manual_never_fabricates_a_verdict(self):
         result = diag.check_dictation_manual()
@@ -366,7 +395,7 @@ class DictationCheckTests(unittest.TestCase):
 
 
 class RunDiagnosticsOrchestrationTests(unittest.TestCase):
-    def test_returns_all_six_checks_with_stable_ids(self):
+    def test_returns_all_seven_checks_with_stable_ids(self):
         report = diag.run_diagnostics()
         ids = {check.check_id for check in report.checks}
         self.assertEqual(
@@ -377,6 +406,7 @@ class RunDiagnosticsOrchestrationTests(unittest.TestCase):
                 "ble_candidate",
                 "vb_cable_endpoints",
                 "output_endpoint",
+                "dji_mic_2_input",
                 "dictation",
             },
         )
@@ -402,7 +432,7 @@ class RunDiagnosticsOrchestrationTests(unittest.TestCase):
 
 class RunDiagnosticsIsolationTests(unittest.TestCase):
     """XRBM-031 RETRY 1 item 2: an unexpected exception from any ONE check
-    function must never abort run_diagnostics() or leave the other five
+    function must never abort run_diagnostics() or leave the other six
     checks missing - it becomes only that check's own honest FAIL result.
     """
 
@@ -416,14 +446,17 @@ class RunDiagnosticsIsolationTests(unittest.TestCase):
         ):
             report = module.run_diagnostics()
 
-        self.assertEqual(len(report.checks), 6)
+        self.assertEqual(len(report.checks), 7)
         failed = report.get("ble_candidate")
         self.assertEqual(failed.status, diag.CheckStatus.FAIL)
         self.assertEqual(failed.group, diag.CheckGroup.VOICE_BRIDGE)
         self.assertNotIn("boom", failed.detail)
-        # The other five checks still render their own real result -
+        # The other six checks still render their own real result -
         # nothing else was aborted or left missing.
-        other_ids = {"os_version", "raw_input", "vb_cable_endpoints", "output_endpoint", "dictation"}
+        other_ids = {
+            "os_version", "raw_input", "vb_cable_endpoints", "output_endpoint",
+            "dji_mic_2_input", "dictation"
+        }
         self.assertEqual({c.check_id for c in report.checks} - {"ble_candidate"}, other_ids)
         for check_id in other_ids:
             result = report.get(check_id)
@@ -454,7 +487,7 @@ class RunDiagnosticsIsolationTests(unittest.TestCase):
             with mock.patch.object(module, "check_dictation_manual", side_effect=RuntimeError("b")):
                 report = module.run_diagnostics()
 
-        self.assertEqual(len(report.checks), 6)
+        self.assertEqual(len(report.checks), 7)
         self.assertEqual(report.get("os_version").status, diag.CheckStatus.FAIL)
         self.assertEqual(report.get("dictation").status, diag.CheckStatus.FAIL)
         # Untouched checks are unaffected.
@@ -1214,9 +1247,9 @@ class RunDiagnosticsStopsAfterCancellationTests(unittest.TestCase):
     to be discarded unemitted anyway.
     """
 
-    def test_no_cancel_event_still_runs_all_six_checks(self):
+    def test_no_cancel_event_still_runs_all_seven_checks(self):
         report = diag.run_diagnostics()
-        self.assertEqual(len(report.checks), 6)
+        self.assertEqual(len(report.checks), 7)
 
     def test_stops_immediately_after_the_check_during_which_cancellation_was_observed(self):
         cancel_event = threading.Event()

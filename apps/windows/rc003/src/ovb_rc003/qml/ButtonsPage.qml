@@ -18,6 +18,9 @@ Item {
     readonly property real photoAspectRatio: 1030 / 508
 
     RowLayout {
+        id: rc003MappingLayout
+        objectName: "rc003MappingLayout"
+        visible: SettingsController.isRc003Device
         anchors.fill: parent
         anchors.margins: tokens.spacingLarge
         spacing: tokens.spacingLarge
@@ -274,13 +277,26 @@ Item {
                             }
                         }
 
-                        Label {
+                        ColumnLayout {
                             visible: mappingRow.isMic
                             Layout.fillWidth: true
-                            wrapMode: Text.WordWrap
-                            text: mappingRow.actionText
-                            color: tokens.disabledText
-                            font.pixelSize: tokens.fontSizeSmall
+                            spacing: 2
+                            TextField {
+                                id: voiceHotkeyField
+                                Layout.fillWidth: true
+                                text: SettingsController.hotkeyText
+                                placeholderText: qsTr("例如 ctrl+shift+u 或 win+h")
+                                selectByMouse: true
+                                onEditingFinished: SettingsController.hotkeyText = text
+                                Accessible.name: qsTr("语音键组合键")
+                            }
+                            Label {
+                                Layout.fillWidth: true
+                                wrapMode: Text.WordWrap
+                                text: qsTr("需与 Windows 或输入法的语音快捷键保持一致；系统语音键入通常为 Win+H。")
+                                color: tokens.textSecondary
+                                font.pixelSize: tokens.fontSizeSmall
+                            }
                         }
 
                         ComboBox {
@@ -358,6 +374,213 @@ Item {
                             onActivated: ButtonMappingModel.setActionTextAt(mappingRow.index, currentText)
                         }
                     }
+                }
+            }
+        }
+    }
+
+    RowLayout {
+        id: djiControlLayout
+        objectName: "djiControlLayout"
+        visible: SettingsController.isDjiMic2Device
+        anchors.fill: parent
+        anchors.margins: tokens.spacingLarge
+        spacing: tokens.spacingLarge
+
+        ColumnLayout {
+            Layout.preferredWidth: 250
+            Layout.fillHeight: true
+            spacing: tokens.spacingSmall
+
+            Rectangle {
+                Layout.preferredWidth: 210
+                Layout.preferredHeight: 360
+                Layout.alignment: Qt.AlignHCenter | Qt.AlignTop
+                radius: tokens.cornerRadiusLarge
+                color: tokens.surface
+                border.color: tokens.border
+                border.width: 1
+
+                Rectangle {
+                    id: transmitter
+                    width: 112
+                    height: 250
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    anchors.top: parent.top
+                    anchors.topMargin: 32
+                    radius: tokens.cornerRadiusLarge
+                    color: tokens.fieldBackground
+                    border.color: tokens.border
+                    border.width: 1
+
+                    Label {
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        anchors.top: parent.top
+                        anchors.topMargin: 22
+                        text: qsTr("DJI MIC 2")
+                        font.bold: true
+                        color: tokens.textPrimary
+                    }
+
+                    Rectangle {
+                        width: 36
+                        height: 36
+                        radius: 18
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        anchors.top: parent.top
+                        anchors.topMargin: 72
+                        color: tokens.surface
+                        border.color: tokens.voiceAccent
+                        border.width: 2
+                        Label {
+                            anchors.centerIn: parent
+                            text: qsTr("录")
+                            color: tokens.textPrimary
+                            font.bold: true
+                        }
+                    }
+
+                    Rectangle {
+                        width: 64
+                        height: 32
+                        radius: tokens.cornerRadiusSmall
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        anchors.top: parent.top
+                        anchors.topMargin: 132
+                        color: tokens.surface
+                        border.color: tokens.border
+                        Label {
+                            anchors.centerIn: parent
+                            text: qsTr("连接")
+                            color: tokens.textPrimary
+                        }
+                    }
+
+                    Rectangle {
+                        width: 64
+                        height: 32
+                        radius: tokens.cornerRadiusSmall
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        anchors.top: parent.top
+                        anchors.topMargin: 184
+                        color: tokens.surface
+                        border.color: tokens.border
+                        Label {
+                            anchors.centerIn: parent
+                            text: qsTr("电源")
+                            color: tokens.textPrimary
+                        }
+                    }
+                }
+
+                Label {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    anchors.bottom: parent.bottom
+                    anchors.bottomMargin: 22
+                    text: qsTr("功能示意，非产品照片")
+                    color: tokens.textSecondary
+                    font.pixelSize: tokens.fontSizeSmall
+                }
+            }
+
+            Label {
+                Layout.preferredWidth: 230
+                Layout.alignment: Qt.AlignHCenter
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode: Text.WordWrap
+                text: qsTr("DJI Mic 2 在 Windows 中首先是录音输入设备，不继承 RC003 的 13 键映射。")
+                color: tokens.textSecondary
+                font.pixelSize: tokens.fontSizeSmall
+            }
+        }
+
+        ColumnLayout {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            spacing: tokens.spacingSmall
+
+            Label {
+                text: qsTr("DJI Mic 2 设备控制")
+                font.pixelSize: tokens.fontSizeTitle
+                font.bold: true
+                color: tokens.textPrimary
+            }
+            Label {
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                text: qsTr("当前可自定义映射：0。只有在真实 Windows 捕获到某个实体键的独立输入事件后，才会开放该键的映射选项。")
+                color: tokens.textSecondary
+                font.pixelSize: tokens.fontSizeSmall
+            }
+
+            Repeater {
+                model: SettingsController.djiControlRows
+                delegate: Rectangle {
+                    required property var modelData
+                    Layout.fillWidth: true
+                    implicitHeight: controlRow.implicitHeight + tokens.spacingMedium * 2
+                    radius: tokens.cornerRadiusSmall
+                    color: tokens.surface
+                    border.color: tokens.border
+                    border.width: 1
+
+                    RowLayout {
+                        id: controlRow
+                        anchors.fill: parent
+                        anchors.margins: tokens.spacingMedium
+                        spacing: tokens.spacingMedium
+
+                        Rectangle {
+                            Layout.preferredWidth: 72
+                            Layout.preferredHeight: 32
+                            radius: tokens.cornerRadiusSmall
+                            color: tokens.fieldBackground
+                            Label {
+                                anchors.centerIn: parent
+                                text: modelData.name
+                                color: tokens.textPrimary
+                                font.bold: true
+                            }
+                        }
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 2
+                            Label {
+                                Layout.fillWidth: true
+                                wrapMode: Text.WordWrap
+                                text: modelData.behavior
+                                color: tokens.textPrimary
+                                font.pixelSize: tokens.fontSizeBody
+                            }
+                            Label {
+                                Layout.fillWidth: true
+                                wrapMode: Text.WordWrap
+                                text: modelData.mapping
+                                color: tokens.textSecondary
+                                font.pixelSize: tokens.fontSizeSmall
+                            }
+                        }
+                        Label {
+                            text: qsTr("硬件内置")
+                            color: tokens.disabledText
+                            font.pixelSize: tokens.fontSizeSmall
+                        }
+                    }
+                }
+            }
+
+            Item { Layout.fillHeight: true }
+
+            RowLayout {
+                Layout.alignment: Qt.AlignRight
+                Button {
+                    text: qsTr("重新检测麦克风")
+                    onClicked: SettingsController.refreshDjiMicStatus()
+                }
+                Button {
+                    text: qsTr("打开 Windows 声音输入设置")
+                    highlighted: true
+                    onClicked: SettingsController.openSoundSettings()
                 }
             }
         }

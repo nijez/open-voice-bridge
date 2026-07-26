@@ -33,6 +33,7 @@ from ovb_rc003 import (
     audio_output,
     bridge_launcher,
     config,
+    device_catalog,
     hotkey,
     key_mapping,
     qt_settings_app,
@@ -329,7 +330,7 @@ class SettingsControllerTests(unittest.TestCase):
 
     def test_hotkey_text_defaults_to_the_configured_default(self):
         controller, _ = self._make_controller()
-        self.assertEqual(controller.hotkeyText, "win+h")
+        self.assertEqual(controller.hotkeyText, "ctrl+shift+u")
 
     def test_trigger_mode_options_has_exactly_toggle_and_hold(self):
         controller, _ = self._make_controller()
@@ -350,6 +351,40 @@ class SettingsControllerTests(unittest.TestCase):
         # written to hold either way (never a stretched/fake image, see
         # task DoD): availability and a non-empty source string must agree.
         self.assertEqual(controller.photoAvailable, bool(controller.photoSource))
+
+    def test_device_selector_defaults_to_rc003_for_existing_users(self):
+        controller, _ = self._make_controller()
+        self.assertEqual(controller.selectedDeviceIndex, 0)
+        self.assertTrue(controller.isRc003Device)
+        self.assertFalse(controller.isDjiMic2Device)
+        self.assertEqual(controller.mappingPageTitle, "按键映射")
+
+    def test_selecting_dji_changes_the_ui_contract_and_persists(self):
+        controller, _ = self._make_controller()
+        controller.selectedDeviceIndex = 1
+        self.assertFalse(controller.isRc003Device)
+        self.assertTrue(controller.isDjiMic2Device)
+        self.assertEqual(controller.mappingPageTitle, "设备控制")
+        self.assertIn("Windows 录音输入", controller.selectedDeviceDescription)
+        self.assertTrue(controller.saveSettings())
+        stored = config.load_config(config.config_path(Path(self._tmpdir.name) / "OpenVoiceBridge" / "RC003"))
+        self.assertEqual(stored["selected_device_profile"], device_catalog.DJI_MIC_2_ID)
+
+    def test_dji_control_rows_match_the_truthful_device_catalog(self):
+        controller, _ = self._make_controller()
+        self.assertEqual(
+            [row["name"] for row in controller.djiControlRows],
+            ["录音键", "连接键", "电源键"],
+        )
+        self.assertTrue(all("映射" in row["mapping"] for row in controller.djiControlRows))
+
+    def test_dji_save_and_launch_never_starts_the_rc003_bridge(self):
+        controller, _ = self._make_controller()
+        controller.selectedDeviceIndex = 1
+        with mock.patch.object(bridge_launcher, "launch_bridge") as fake_launch:
+            controller.saveAndLaunch()
+        fake_launch.assert_not_called()
+        self.assertIn("不启动 RC003", controller.launchStatusText)
 
     def test_save_settings_persists_and_clears_error_message(self):
         controller, model = self._make_controller()
@@ -510,7 +545,7 @@ class DiagnosticsControllerTests(unittest.TestCase):
         diag = self.DiagnosticsController(settings_controller, self._config_root)
         self.assertTrue(diag.isRefreshing)
         self.assertTrue(self._pump_until(lambda: not diag.isRefreshing))
-        self.assertEqual(len(diag.checkResults), 6)
+        self.assertEqual(len(diag.checkResults), 7)
         ids = {row["checkId"] for row in diag.checkResults}
         self.assertIn("dictation", ids)
 
@@ -531,7 +566,7 @@ class DiagnosticsControllerTests(unittest.TestCase):
         settings_controller = self._make_settings_controller()
         diag = self.DiagnosticsController(settings_controller, self._config_root)
         self.assertTrue(self._pump_until(lambda: not diag.isRefreshing))
-        self.assertEqual(len(diag.checkResults), 6)  # a real prior run populated these
+        self.assertEqual(len(diag.checkResults), 7)  # a real prior run populated these
         self.assertEqual(diag.diagnosticsErrorMessage, "")
 
         with mock.patch.object(
@@ -559,7 +594,7 @@ class DiagnosticsControllerTests(unittest.TestCase):
         diag.refreshDiagnostics()
         self.assertTrue(self._pump_until(lambda: not diag.isRefreshing))
         self.assertEqual(diag.diagnosticsErrorMessage, "")
-        self.assertEqual(len(diag.checkResults), 6)
+        self.assertEqual(len(diag.checkResults), 7)
 
     def test_worker_thread_is_deregistered_once_finished(self):
         settings_controller = self._make_settings_controller()
@@ -1067,6 +1102,71 @@ print(json.dumps(result))
 """
 
 
+_DJI_DEVICE_PAGE_PROBE_SCRIPT = r"""
+import json
+
+from ovb_rc003 import qt_settings_app as m
+
+
+def find_child(root, name):
+    for child in root.children():
+        if child.objectName() == name:
+            return child
+        found = find_child(child, name)
+        if found is not None:
+            return found
+    return None
+
+
+classes = m._load_qt_classes()
+QGuiApplication = classes["QGuiApplication"]
+QQmlApplicationEngine = classes["QQmlApplicationEngine"]
+QQuickStyle = classes["QQuickStyle"]
+QUrl = classes["QUrl"]
+qmlRegisterSingletonInstance = classes["qmlRegisterSingletonInstance"]
+ButtonMappingModel = classes["ButtonMappingModel"]
+SettingsController = classes["SettingsController"]
+DiagnosticsController = classes["DiagnosticsController"]
+
+QQuickStyle.setStyle("Basic")
+app = QGuiApplication.instance() or QGuiApplication([])
+model = ButtonMappingModel()
+controller = SettingsController(model)
+controller.selectedDeviceIndex = 1
+diagnostics_controller = DiagnosticsController(controller, m.config.config_root())
+qmlRegisterSingletonInstance(SettingsController, "OvbRc003Settings", 1, 0, "SettingsController", controller)
+qmlRegisterSingletonInstance(ButtonMappingModel, "OvbRc003Settings", 1, 0, "ButtonMappingModel", model)
+qmlRegisterSingletonInstance(DiagnosticsController, "OvbRc003Settings", 1, 0, "DiagnosticsController", diagnostics_controller)
+
+engine = QQmlApplicationEngine()
+qml_dir = m._qml_directory()
+engine.addImportPath(str(qml_dir))
+engine.load(QUrl.fromLocalFile(str(qml_dir / "main.qml")))
+assert len(engine.rootObjects()) == 1, "main.qml failed to load"
+window = engine.rootObjects()[0]
+window.show()
+tab_bar = find_child(window, "tabBar")
+assert tab_bar is not None
+tab_bar.setProperty("currentIndex", 1)
+for _ in range(10):
+    window.grabWindow()
+    app.processEvents()
+
+dji_layout = find_child(window, "djiControlLayout")
+rc003_layout = find_child(window, "rc003MappingLayout")
+assert dji_layout is not None
+assert rc003_layout is not None
+result = {
+    "dji_visible": bool(dji_layout.property("visible")),
+    "rc003_visible": bool(rc003_layout.property("visible")),
+    "mapping_page_title": controller.mappingPageTitle,
+    "control_names": [row["name"] for row in controller.djiControlRows],
+}
+m._shutdown_diagnostics_workers()
+print(json.dumps(result, ensure_ascii=False))
+"""
+
+
 @unittest.skipUnless(_HAS_PYSIDE6, _SKIP_REASON)
 class OffscreenQmlLoadTests(unittest.TestCase):
     """Loads the REAL qml/main.qml (not a stand-in snippet), in an isolated
@@ -1103,6 +1203,29 @@ class OffscreenQmlLoadTests(unittest.TestCase):
         )
         self.assertGreater(data["width"], 0)
         self.assertGreater(data["height"], 0)
+
+    def test_dji_device_page_hides_rc003_mapping_and_shows_dji_controls(self):
+        import json
+        import subprocess
+
+        env = dict(os.environ)
+        env.setdefault("QT_QPA_PLATFORM", "offscreen")
+        env["LOCALAPPDATA"] = tempfile.mkdtemp()
+        result = subprocess.run(
+            [sys.executable, "-c", _DJI_DEVICE_PAGE_PROBE_SCRIPT],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(
+            result.returncode, 0, f"DJI QML page probe failed: {result.stderr}"
+        )
+        data = json.loads(result.stdout.strip().splitlines()[-1])
+        self.assertTrue(data["dji_visible"])
+        self.assertFalse(data["rc003_visible"])
+        self.assertEqual(data["mapping_page_title"], "设备控制")
+        self.assertEqual(data["control_names"], ["录音键", "连接键", "电源键"])
 
 
 class QmlLoadProbeCallsProductionShutdownHelperTests(unittest.TestCase):

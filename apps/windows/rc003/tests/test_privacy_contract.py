@@ -9,6 +9,7 @@ PowerShell script is what actually gates a real Windows build.
 
 import ast
 import re
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -188,11 +189,19 @@ class NoElevationOrAutoDriverTests(unittest.TestCase):
 
 class NoBinariesCommittedTests(unittest.TestCase):
     def test_no_forbidden_binary_extensions_under_rc003(self):
-        rc003_root = _PACKAGE_ROOT.parents[2]
+        rc003_root = _PACKAGE_ROOT.parents[1]
+        repository_root = rc003_root.parents[2]
+        tracked = subprocess.run(
+            ["git", "ls-files", "--", "apps/windows/rc003"],
+            cwd=repository_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()
         offenders = [
-            str(path)
-            for path in rc003_root.rglob("*")
-            if path.is_file() and path.suffix.lower() in _FORBIDDEN_BINARY_SUFFIXES
+            path
+            for path in tracked
+            if Path(path).suffix.lower() in _FORBIDDEN_BINARY_SUFFIXES
         ]
         self.assertEqual(offenders, [], f"forbidden binary committed: {offenders}")
 

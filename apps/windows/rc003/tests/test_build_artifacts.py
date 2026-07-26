@@ -233,6 +233,13 @@ class PyInstallerSpecTests(unittest.TestCase):
         self.assertIn('SRC_ROOT / "launcher.py"', text)
         self.assertNotIn('SRC_ROOT / "ovb_rc003" / "__main__.py"', text)
 
+    def test_spec_bundles_the_shared_device_profile_directory_as_data(self):
+        text = _SPEC_PATH.read_text(encoding="utf-8")
+        self.assertIn('DEVICE_PROFILES_DIR = REPO_ROOT / "device-profiles"', text)
+        self.assertIn(
+            'datas.append((str(DEVICE_PROFILES_DIR), "device-profiles"))', text
+        )
+
 
 class LauncherEntryPointTests(unittest.TestCase):
     """XRBM-021 In-scope item 1/5: structural regression coverage for the
@@ -1048,12 +1055,14 @@ class RootDocumentConsistencyTests(unittest.TestCase):
         # The corrected sentence must still say macOS is the only
         # real-device-accepted combination, name RC003 Windows as a
         # source/build candidate that is not real-device verified, and
-        # keep Linux/DJI Mic 2 as planned/research (that part was accurate).
+        # keep Linux planned while describing DJI Mic 2's new development/
+        # real-device-acceptance state without falsely claiming full support.
         self.assertIn("Xiaomi Bluetooth Remote 2 Pro / RC003 + macOS", self.root_readme_text)
         self.assertIn("RC003 Windows", self.root_readme_text)
         self.assertIn("源码/构建候选", self.root_readme_text)
         self.assertIn("未真机验收", self.root_readme_text)
-        self.assertIn("Linux 和 DJI Mic 2 仍是 planned/research", self.root_readme_text)
+        self.assertIn("DJI Mic 2 的双平台系统输入识别正在开发和真机验收中", self.root_readme_text)
+        self.assertIn("Linux 仍为 planned/research", self.root_readme_text)
 
     def test_third_party_notices_does_not_falsely_deny_all_vbcable_reference(self):
         # THIRD_PARTY_NOTICES.md previously claimed the Windows candidate

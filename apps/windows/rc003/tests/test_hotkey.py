@@ -4,8 +4,8 @@ from ovb_rc003 import hotkey
 
 
 class HotkeySpecTests(unittest.TestCase):
-    def test_default_voice_hotkey_serializes_to_win_plus_h(self):
-        self.assertEqual(hotkey.DEFAULT_VOICE_HOTKEY.serialize(), "win+h")
+    def test_default_voice_hotkey_uses_the_uncommon_configurable_chord(self):
+        self.assertEqual(hotkey.DEFAULT_VOICE_HOTKEY.serialize(), "ctrl+shift+u")
 
     def test_parse_and_serialize_round_trip(self):
         spec = hotkey.HotkeySpec.parse("win+h")

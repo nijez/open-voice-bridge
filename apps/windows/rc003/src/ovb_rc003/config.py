@@ -70,10 +70,13 @@ def key_bindings_path(root: Path = None) -> Path:  # type: ignore[assignment]
 def default_config() -> Dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
+        # Existing installations predate multi-device selection and must
+        # continue to open as RC003 rather than silently switching behavior.
+        "selected_device_profile": "xiaomi-rc003",
         "gain_db": 0.0,
         "retry_delay": 2.0,
         "voice_shortcut_enabled": True,
-        "voice_hotkey": "win+h",
+        "voice_hotkey": "ctrl+shift+u",
         "voice_trigger_mode": "toggle",
         # Empty until the user explicitly picks one in settings; voice fails
         # closed while this is empty (see audio_output.resolve_selected_endpoint).

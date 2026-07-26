@@ -23,6 +23,10 @@ class ConfigRootTests(unittest.TestCase):
 
 
 class DefaultConfigPrivacyTests(unittest.TestCase):
+    def test_default_config_preserves_existing_users_on_rc003(self):
+        self.assertEqual(config.default_config()["selected_device_profile"], "xiaomi-rc003")
+        self.assertEqual(config.default_config()["voice_hotkey"], "ctrl+shift+u")
+
     def test_default_config_contains_no_forbidden_identity_fields(self):
         defaults = config.default_config()
         self.assertFalse(config.FORBIDDEN_KEYS.intersection(defaults.keys()))

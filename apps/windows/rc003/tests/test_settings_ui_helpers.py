@@ -45,7 +45,7 @@ class DisplayRoundTripTests(unittest.TestCase):
     def test_voice_action_display_mentions_hotkey_settings(self):
         action = key_mapping.ButtonAction(key_mapping.ActionKind.VOICE)
         display = _action_to_display(action)
-        self.assertIn("Win+H", display)
+        self.assertIn("专用组合键", display)
 
     def test_voice_action_round_trips_without_raising(self):
         # Regression test for the exact XRBM-014 review RETRY P1 #7 bug:
@@ -147,7 +147,7 @@ class BuildSaveModelTests(unittest.TestCase):
             base_bindings=self.base_bindings,
         )
         self.assertEqual(new_bindings["bindings"]["mic"]["kind"], "voice")
-        self.assertEqual(new_config["voice_hotkey"], "win+h")
+        self.assertEqual(new_config["voice_hotkey"], "ctrl+shift+u")
 
     def test_invalid_hotkey_raises_with_no_button_id(self):
         with self.assertRaises(SettingsValidationError) as ctx:
@@ -210,6 +210,31 @@ class BuildSaveModelTests(unittest.TestCase):
         )
         self.assertEqual(self.base_config, base_config_copy)
         self.assertEqual(self.base_bindings, base_bindings_copy)
+
+    def test_selected_dji_profile_is_persisted_without_overwriting_rc003_bindings(self):
+        new_config, new_bindings = build_save_model(
+            button_display_map={"power": "escape"},
+            hotkey_text="win+h",
+            trigger_mode=key_mapping.VoiceTriggerMode.TOGGLE,
+            endpoint_display_text="",
+            base_config=self.base_config,
+            base_bindings=self.base_bindings,
+            selected_device_profile="dji-mic-2",
+        )
+        self.assertEqual(new_config["selected_device_profile"], "dji-mic-2")
+        self.assertEqual(new_bindings["bindings"]["power"]["keys"], ["escape"])
+
+    def test_unknown_device_profile_falls_back_to_rc003(self):
+        new_config, _ = build_save_model(
+            button_display_map={},
+            hotkey_text="win+h",
+            trigger_mode=key_mapping.VoiceTriggerMode.TOGGLE,
+            endpoint_display_text="",
+            base_config=self.base_config,
+            base_bindings=self.base_bindings,
+            selected_device_profile="invented-device",
+        )
+        self.assertEqual(new_config["selected_device_profile"], "xiaomi-rc003")
 
 
 class DefaultDisplayStateTests(unittest.TestCase):

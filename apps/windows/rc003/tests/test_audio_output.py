@@ -229,5 +229,32 @@ class EnumerateInputEndpointsFilteringTests(unittest.TestCase):
         self.assertTrue(audio_output.is_cable_input_endpoint(endpoints[0].name))
 
 
+class DjiMic2EndpointIdentityTests(unittest.TestCase):
+    def test_matches_windows_hands_free_and_plain_product_names(self):
+        self.assertTrue(
+            audio_output.is_dji_mic_2_input_endpoint("DJI-MIC2-ABCDEF Hands-Free")
+        )
+        self.assertTrue(audio_output.is_dji_mic_2_input_endpoint("DJI Mic 2"))
+        self.assertTrue(audio_output.is_dji_mic_2_input_endpoint("DJI Mic2 (Bluetooth)"))
+        self.assertTrue(
+            audio_output.is_dji_mic_2_input_endpoint(
+                "Microphone (DJI-MIC2-ABCDEF Hands-Free)"
+            )
+        )
+        self.assertTrue(
+            audio_output.is_dji_mic_2_input_endpoint(
+                "\u9ea6\u514b\u98ce (@System32\\drivers\\bthhfenum.sys;(DJI-MIC2-ABCDEF))"
+            )
+        )
+
+    def test_rejects_lookalikes_and_other_microphones(self):
+        self.assertFalse(audio_output.is_dji_mic_2_input_endpoint("DJI-MIC20"))
+        self.assertFalse(
+            audio_output.is_dji_mic_2_input_endpoint("Recorder for DJI-MIC20 Hands-Free")
+        )
+        self.assertFalse(audio_output.is_dji_mic_2_input_endpoint("DJI Mic Mini"))
+        self.assertFalse(audio_output.is_dji_mic_2_input_endpoint("Microphone Array"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -13,7 +13,7 @@ import sys
 import unittest
 
 from ovb_rc003 import __main__ as main_module
-from ovb_rc003 import app, single_instance, windows_diagnostics
+from ovb_rc003 import app, config, device_catalog, single_instance, windows_diagnostics
 
 
 def _make_guard_class(*, raise_on_enter=None, enter_calls=None):
@@ -42,6 +42,7 @@ class _ArgvRestoringTestCase(unittest.TestCase):
         self._original_guard_cls = single_instance.BridgeInstanceGuard
         self._original_app_main = app.main
         self._original_notice = single_instance.show_bridge_startup_blocked_notice
+        self._original_load_config = config.load_config
         # XRBM-023: default every test in this suite to a safe no-op stub for
         # the visible-notice callable. show_bridge_startup_blocked_notice's
         # real implementation opens a real, SYSTEMMODAL Win32 MessageBoxW -
@@ -52,15 +53,36 @@ class _ArgvRestoringTestCase(unittest.TestCase):
         # Tests that need to assert on the exact notice text/call count still
         # override this in their own body, same as before.
         single_instance.show_bridge_startup_blocked_notice = lambda message: None
+        config.load_config = lambda path: {
+            "selected_device_profile": device_catalog.RC003_ID
+        }
 
     def tearDown(self):
         sys.argv = self._original_argv
         single_instance.BridgeInstanceGuard = self._original_guard_cls
         app.main = self._original_app_main
         single_instance.show_bridge_startup_blocked_notice = self._original_notice
+        config.load_config = self._original_load_config
 
 
 class BridgeModeRoutingTests(_ArgvRestoringTestCase):
+    def test_dji_profile_never_starts_the_rc003_bridge(self):
+        app.main = lambda: self.fail("DJI Mic 2 must not start the RC003 bridge")
+        config.load_config = lambda path: {
+            "selected_device_profile": device_catalog.DJI_MIC_2_ID
+        }
+        notice_calls = []
+        single_instance.show_bridge_startup_blocked_notice = (
+            lambda message, **kwargs: notice_calls.append((message, kwargs))
+        )
+        sys.argv = ["ovb_rc003"]
+
+        main_module.main()
+
+        self.assertEqual(len(notice_calls), 1)
+        self.assertIn("DJI Mic 2", notice_calls[0][0])
+        self.assertEqual(notice_calls[0][1]["title"], "Open Voice Bridge")
+
     def test_no_args_calls_app_main_exactly_once_on_first_owner(self):
         app_main_calls = []
         app.main = lambda: app_main_calls.append(1)

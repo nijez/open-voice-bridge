@@ -1,0 +1,68 @@
+{
+  "$schema": "../specs/device-profile.schema.json",
+  "schemaVersion": 1,
+  "id": "xiaomi-arn9",
+  "displayName": "Xiaomi Bluetooth Voice Remote / ARN9",
+  "vendor": "Xiaomi",
+  "model": "ARN9",
+  "support": {
+    "status": "implemented",
+    "notes": "The macOS adapter has completed single-device HID, BLE ATVV, press/release and voice-stream acceptance. Two same-name Xiaomi remotes online at once still require explicit instance selection and are not covered by this status."
+  },
+  "identity": {
+    "bluetoothNames": [
+      "小米蓝牙语音遥控器"
+    ],
+    "hid": {
+      "vendorId": 10007,
+      "productId": 12984
+    }
+  },
+  "transports": [
+    {
+      "kind": "ble-gatt",
+      "role": "voice-input",
+      "status": "implemented",
+      "notes": "The ARN9 real-device test confirmed the same ATVV capability negotiation, microphone control and compressed voice stream used by the Xiaomi adapter family."
+    },
+    {
+      "kind": "bluetooth-hid",
+      "role": "button-input",
+      "status": "implemented",
+      "notes": "The ARN9 real-device test confirmed the hardware microphone F5 edge and its standard remote buttons through IOHID. The device has no TV button."
+    }
+  ],
+  "capabilities": [
+    "voice-capture",
+    "press-to-talk",
+    "button-input",
+    "host-key-mapping"
+  ],
+  "protocols": [
+    {
+      "id": "android-tv-voice-over-ble",
+      "status": "implemented",
+      "notes": "Single-device real-hardware acceptance confirmed capability negotiation and balanced ATVV stream start/stop."
+    }
+  ],
+  "platforms": [
+    {
+      "platform": "macos",
+      "status": "implemented",
+      "notes": "Universal build target; single-device real-hardware acceptance performed on Apple Silicon."
+    },
+    {
+      "platform": "windows",
+      "status": "planned",
+      "notes": "No ARN9-specific Windows real-device acceptance has been completed."
+    },
+    {
+      "platform": "linux",
+      "status": "planned",
+      "notes": "No Open Voice Bridge Linux adapter has been implemented."
+    }
+  ],
+  "sources": [
+    "https://github.com/xxb26553663-star/remote-bridge-hub"
+  ]
+}

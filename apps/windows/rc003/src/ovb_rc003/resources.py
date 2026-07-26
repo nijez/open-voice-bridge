@@ -46,6 +46,7 @@ from pathlib import Path
 from typing import Iterator, Optional
 
 _PHOTO_FILENAME = "RC003-remote-photo.png"
+_DEVICE_PROFILES_DIRECTORY = "device-profiles"
 
 
 def _candidate_paths() -> Iterator[Path]:
@@ -66,5 +67,23 @@ def _candidate_paths() -> Iterator[Path]:
 def find_remote_photo() -> Optional[Path]:
     for candidate in _candidate_paths():
         if candidate.is_file():
+            return candidate
+    return None
+
+
+def _device_profile_directory_candidates() -> Iterator[Path]:
+    frozen_root = getattr(sys, "_MEIPASS", None)
+    if frozen_root:
+        yield Path(frozen_root) / _DEVICE_PROFILES_DIRECTORY
+        return
+    # Source checkout: apps/windows/rc003/src/ovb_rc003/resources.py -> repo root.
+    yield Path(__file__).resolve().parents[5] / _DEVICE_PROFILES_DIRECTORY
+
+
+def find_device_profiles_directory() -> Optional[Path]:
+    """Returns only a real shared-catalog directory; never a CWD fallback."""
+
+    for candidate in _device_profile_directory_candidates():
+        if candidate.is_dir():
             return candidate
     return None

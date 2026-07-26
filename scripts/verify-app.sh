@@ -22,12 +22,29 @@ test -f "$APP/Contents/Resources/README.md"
 test -f "$APP/Contents/Resources/THIRD_PARTY_NOTICES.md"
 test -f "$APP/Contents/Resources/COPYRIGHT"
 test -f "$APP/Contents/Resources/RC003-remote-photo.png"
+test -f "$APP/Contents/Resources/ARN9-remote-photo.png"
+test -f "$APP/Contents/Resources/OpenVoiceBridge.icns"
+test -f "$APP/Contents/Resources/device-profiles/xiaomi-rc003.json"
+test -f "$APP/Contents/Resources/device-profiles/xiaomi-arn9.json"
+test -f "$APP/Contents/Resources/device-profiles/dji-mic-2.json"
+cmp -s \
+  "$ROOT/device-profiles/xiaomi-rc003.json" \
+  "$APP/Contents/Resources/device-profiles/xiaomi-rc003.json"
+cmp -s \
+  "$ROOT/device-profiles/xiaomi-arn9.json" \
+  "$APP/Contents/Resources/device-profiles/xiaomi-arn9.json"
+cmp -s \
+  "$ROOT/device-profiles/dji-mic-2.json" \
+  "$APP/Contents/Resources/device-profiles/dji-mic-2.json"
 
 test "$(plutil -extract CFBundleIdentifier raw -o - "$PLIST")" = \
   "com.kingwell.XiaomiRemoteBridgeMac"
-test "$(plutil -extract LSUIElement raw -o - "$PLIST")" = "true"
+test "$(plutil -extract LSUIElement raw -o - "$PLIST")" = "false"
+test "$(plutil -extract CFBundleIconFile raw -o - "$PLIST")" = \
+  "OpenVoiceBridge.icns"
 test "$(plutil -extract LSMinimumSystemVersion raw -o - "$PLIST")" = "11.0"
 test -n "$(plutil -extract NSBluetoothAlwaysUsageDescription raw -o - "$PLIST")"
+test -n "$(plutil -extract NSMicrophoneUsageDescription raw -o - "$PLIST")"
 
 codesign --verify --deep --strict "$APP"
 file "$BINARY" | rg -q 'Mach-O 64-bit executable'
@@ -43,7 +60,7 @@ if [[ "$UNIVERSAL" -eq 1 ]]; then
   done
 fi
 
-EXPECTED_FILES=$'Contents/Info.plist\nContents/MacOS/XiaomiRemoteBridgeMac\nContents/Resources/COPYRIGHT\nContents/Resources/LICENSE\nContents/Resources/RC003-remote-photo.png\nContents/Resources/README.md\nContents/Resources/THIRD_PARTY_NOTICES.md\nContents/_CodeSignature/CodeResources'
+EXPECTED_FILES=$'Contents/Info.plist\nContents/MacOS/XiaomiRemoteBridgeMac\nContents/Resources/ARN9-remote-photo.png\nContents/Resources/COPYRIGHT\nContents/Resources/LICENSE\nContents/Resources/OpenVoiceBridge.icns\nContents/Resources/RC003-remote-photo.png\nContents/Resources/README.md\nContents/Resources/THIRD_PARTY_NOTICES.md\nContents/Resources/device-profiles/dji-mic-2.json\nContents/Resources/device-profiles/xiaomi-arn9.json\nContents/Resources/device-profiles/xiaomi-rc003.json\nContents/_CodeSignature/CodeResources'
 ACTUAL_FILES="$(find "$APP/Contents" -type f | sed "s#^$APP/##" | LC_ALL=C sort)"
 test "$ACTUAL_FILES" = "$EXPECTED_FILES"
 

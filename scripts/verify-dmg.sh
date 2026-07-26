@@ -51,7 +51,11 @@ test -f "$SOURCE_ZIP"
 
 test "$(plutil -extract CFBundleShortVersionString raw -o - "$APP/Contents/Info.plist")" = "$VERSION"
 test "$(plutil -extract CFBundleVersion raw -o - "$APP/Contents/Info.plist")" = "$BUILD"
-codesign -dv --verbose=4 "$APP" 2>&1 | rg -q '^Signature=adhoc$'
+APP_SIGNATURE_DETAILS="$(codesign -dv --verbose=4 "$APP" 2>&1)"
+if ! rg -q '^Signature=adhoc$|^Authority=' <<<"$APP_SIGNATURE_DETAILS"; then
+  print -u2 "app is missing both an ad-hoc signature and a named signing authority"
+  exit 1
+fi
 
 test "$(sips -g pixelWidth "$APP/Contents/Resources/RC003-remote-photo.png" | tail -n 1 | tr -cd '0-9')" = "508"
 test "$(sips -g pixelHeight "$APP/Contents/Resources/RC003-remote-photo.png" | tail -n 1 | tr -cd '0-9')" = "1030"
@@ -102,4 +106,11 @@ fi
 
 print "DMG VERIFY PASS: $DMG"
 print "VERSION: $VERSION ($BUILD)"
-print "SIGNATURE: ad-hoc / not notarized"
+SIGNATURE_DETAILS="$(codesign -dv --verbose=4 "$APP" 2>&1)"
+if rg -q '^Signature=adhoc$' <<<"$SIGNATURE_DETAILS"; then
+  SIGNATURE_LABEL="ad-hoc"
+else
+  SIGNING_AUTHORITY="$(print -r -- "$SIGNATURE_DETAILS" | sed -n 's/^Authority=//p' | head -n 1)"
+  SIGNATURE_LABEL="named (${SIGNING_AUTHORITY:-unknown authority})"
+fi
+print "SIGNATURE: $SIGNATURE_LABEL / notarization is not checked by this script"

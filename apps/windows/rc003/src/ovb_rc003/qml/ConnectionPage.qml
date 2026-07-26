@@ -23,8 +23,58 @@ Item {
             y: tokens.spacingLarge
             spacing: tokens.spacingLarge
 
+            // -- Active device -------------------------------------------------
+            Rectangle {
+                Layout.fillWidth: true
+                radius: tokens.cornerRadiusLarge
+                color: tokens.surface
+                border.color: tokens.border
+                border.width: 1
+                implicitHeight: deviceColumn.implicitHeight + tokens.spacingLarge * 2
+
+                ColumnLayout {
+                    id: deviceColumn
+                    anchors.fill: parent
+                    anchors.margins: tokens.spacingLarge
+                    spacing: tokens.spacingSmall
+
+                    Label {
+                        text: qsTr("当前设备")
+                        font.pixelSize: tokens.fontSizeTitle
+                        font.bold: true
+                        color: tokens.textPrimary
+                    }
+                    ComboBox {
+                        id: deviceCombo
+                        objectName: "deviceCombo"
+                        Layout.fillWidth: true
+                        model: SettingsController.deviceOptions
+                        currentIndex: SettingsController.selectedDeviceIndex
+                        onActivated: SettingsController.selectedDeviceIndex = index
+                        enabled: SettingsController.deviceCatalogAvailable
+                        Accessible.name: qsTr("当前设备")
+                    }
+                    Label {
+                        visible: !SettingsController.deviceCatalogAvailable
+                        Layout.fillWidth: true
+                        wrapMode: Text.WordWrap
+                        text: SettingsController.deviceCatalogErrorText
+                        color: tokens.errorColor
+                        font.pixelSize: tokens.fontSizeSmall
+                    }
+                    Label {
+                        Layout.fillWidth: true
+                        wrapMode: Text.WordWrap
+                        text: SettingsController.selectedDeviceDescription
+                        color: tokens.textSecondary
+                        font.pixelSize: tokens.fontSizeSmall
+                    }
+                }
+            }
+
             // -- Bridge control ------------------------------------------------
             Rectangle {
+                visible: SettingsController.isRc003Device
                 Layout.fillWidth: true
                 radius: tokens.cornerRadiusLarge
                 color: tokens.surface
@@ -72,6 +122,7 @@ Item {
 
             // -- Voice output endpoint ------------------------------------------
             Rectangle {
+                visible: SettingsController.isRc003Device
                 Layout.fillWidth: true
                 radius: tokens.cornerRadiusLarge
                 color: tokens.surface
@@ -111,6 +162,7 @@ Item {
 
             // -- Voice hotkey / trigger mode --------------------------------
             Rectangle {
+                visible: SettingsController.isRc003Device
                 Layout.fillWidth: true
                 radius: tokens.cornerRadiusLarge
                 color: tokens.surface
@@ -137,7 +189,7 @@ Item {
                         rowSpacing: tokens.spacingSmall
 
                         Label {
-                            text: qsTr("语音热键 (mod+mod+key)")
+                            text: qsTr("语音键组合键 (mod+mod+key)")
                             color: tokens.textPrimary
                         }
                         TextField {
@@ -151,6 +203,15 @@ Item {
                         }
 
                         Label {
+                            Layout.columnSpan: 2
+                            Layout.fillWidth: true
+                            wrapMode: Text.WordWrap
+                            text: qsTr("新安装默认 Ctrl+Shift+U，较少与常用快捷键冲突。如果使用 Windows 系统语音键入，请改为 Win+H；使用第三方输入法时，两边设为同一组合键。")
+                            color: tokens.textSecondary
+                            font.pixelSize: tokens.fontSizeSmall
+                        }
+
+                        Label {
                             text: qsTr("触发方式")
                             color: tokens.textPrimary
                         }
@@ -161,6 +222,57 @@ Item {
                             currentIndex: SettingsController.triggerModeIndex
                             onActivated: SettingsController.triggerModeIndex = index
                             Accessible.name: qsTr("语音触发方式")
+                        }
+                    }
+                }
+            }
+
+            // -- DJI Mic 2 system-input workflow -------------------------------
+            Rectangle {
+                visible: SettingsController.isDjiMic2Device
+                Layout.fillWidth: true
+                radius: tokens.cornerRadiusLarge
+                color: tokens.surface
+                border.color: tokens.border
+                border.width: 1
+                implicitHeight: djiInputColumn.implicitHeight + tokens.spacingLarge * 2
+
+                ColumnLayout {
+                    id: djiInputColumn
+                    anchors.fill: parent
+                    anchors.margins: tokens.spacingLarge
+                    spacing: tokens.spacingSmall
+
+                    Label {
+                        text: qsTr("DJI Mic 2 录音输入")
+                        font.pixelSize: tokens.fontSizeTitle
+                        font.bold: true
+                        color: tokens.textPrimary
+                    }
+                    Label {
+                        Layout.fillWidth: true
+                        wrapMode: Text.WordWrap
+                        text: SettingsController.djiMicStatusText
+                        color: tokens.textSecondary
+                        font.pixelSize: tokens.fontSizeBody
+                    }
+                    Label {
+                        Layout.fillWidth: true
+                        wrapMode: Text.WordWrap
+                        text: qsTr("DJI Mic 2 是系统麦克风，不使用 RC003 的 CABLE Input 输出或 ATVV 桥。Open Voice Bridge 不会静默修改 Windows 默认输入设备。")
+                        color: tokens.textSecondary
+                        font.pixelSize: tokens.fontSizeSmall
+                    }
+                    RowLayout {
+                        spacing: tokens.spacingSmall
+                        Button {
+                            text: qsTr("重新检测")
+                            onClicked: SettingsController.refreshDjiMicStatus()
+                        }
+                        Button {
+                            text: qsTr("打开 Windows 声音输入设置")
+                            highlighted: true
+                            onClicked: SettingsController.openSoundSettings()
                         }
                     }
                 }
@@ -188,11 +300,15 @@ Item {
                 Layout.alignment: Qt.AlignRight
                 spacing: tokens.spacingSmall
                 Button {
+                    visible: SettingsController.isRc003Device
                     text: qsTr("恢复全部默认")
                     onClicked: SettingsController.restoreDefaults()
                 }
                 Button {
-                    text: qsTr("保存并应用")
+                    objectName: "deviceSaveButton"
+                    text: SettingsController.isRc003Device
+                        ? qsTr("保存并应用")
+                        : qsTr("保存设备选择")
                     highlighted: true
                     onClicked: SettingsController.saveSettings()
                 }

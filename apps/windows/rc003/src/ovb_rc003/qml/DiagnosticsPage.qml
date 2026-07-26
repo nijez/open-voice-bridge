@@ -1,8 +1,7 @@
 // "检查与修复" tab (XRBM-031 In-scope items 1/4/5/6): a fourth top-level page
-// that groups every windows_diagnostics.py check into the four categories
-// In-scope item 4 requires - ordinary-button prerequisites, RC003 voice
-// bridge prerequisites, Windows dictation prerequisite, and the optional
-// third-party driver state - and never lets a passing/running process look
+// that groups every windows_diagnostics.py check into distinct categories:
+// ordinary buttons, RC003 voice, external microphones, Windows dictation,
+// and the optional third-party driver state. It never lets pairing alone look
 // like proof that buttons or speech actually work. DiagnosticsController
 // runs every check off the Qt GUI thread (see qt_settings_app.py's module
 // docstring), so "重新检测" never freezes this window.
@@ -20,6 +19,7 @@ Item {
     readonly property string groupVoiceBridge: "voice_bridge"
     readonly property string groupDictation: "dictation"
     readonly property string groupOptionalDriver: "optional_driver"
+    readonly property string groupExternalMicrophone: "external_microphone"
 
     function rowsForGroup(groupId) {
         var rows = []
@@ -231,6 +231,65 @@ Item {
                                 font.pixelSize: tokens.fontSizeSmall
                             }
                         }
+                    }
+                }
+            }
+
+            // -- Group: external microphone inputs ---------------------------
+            Rectangle {
+                Layout.fillWidth: true
+                radius: tokens.cornerRadiusLarge
+                color: tokens.surface
+                border.color: tokens.border
+                border.width: 1
+                implicitHeight: externalMicColumn.implicitHeight + tokens.spacingLarge * 2
+
+                ColumnLayout {
+                    id: externalMicColumn
+                    anchors.fill: parent
+                    anchors.margins: tokens.spacingLarge
+                    spacing: tokens.spacingSmall
+
+                    Label {
+                        text: qsTr("无线麦克风输入")
+                        font.pixelSize: tokens.fontSizeBody
+                        font.bold: true
+                        color: tokens.textPrimary
+                    }
+                    Label {
+                        Layout.fillWidth: true
+                        wrapMode: Text.WordWrap
+                        text: qsTr("以系统录音端点为准；仅显示“已配对”不能证明麦克风当前可录音。")
+                        color: tokens.textSecondary
+                        font.pixelSize: tokens.fontSizeSmall
+                    }
+                    Repeater {
+                        model: root.rowsForGroup(root.groupExternalMicrophone)
+                        delegate: RowLayout {
+                            Layout.fillWidth: true
+                            spacing: tokens.spacingSmall
+                            Rectangle {
+                                width: 10; height: 10; radius: 5
+                                color: root.statusColor(modelData.status)
+                            }
+                            Label {
+                                Layout.preferredWidth: 160
+                                text: modelData.title
+                                color: tokens.textPrimary
+                                font.pixelSize: tokens.fontSizeSmall
+                            }
+                            Label {
+                                Layout.fillWidth: true
+                                wrapMode: Text.WordWrap
+                                text: root.statusLabel(modelData.status) + " — " + modelData.detail
+                                color: tokens.textSecondary
+                                font.pixelSize: tokens.fontSizeSmall
+                            }
+                        }
+                    }
+                    Button {
+                        text: qsTr("打开 Windows 声音输入设置")
+                        onClicked: SettingsController.openSoundSettings()
                     }
                 }
             }

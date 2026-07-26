@@ -314,6 +314,7 @@ def _real_message_box(title: str, message: str) -> int:
 def show_bridge_startup_blocked_notice(
     message: str,
     *,
+    title: str = "Open Voice Bridge · RC003",
     _message_box: Callable[[str, str], int] = _real_message_box,
 ) -> None:
     """Shows a visible Windows message box for a bridge launch the
@@ -329,6 +330,6 @@ def show_bridge_startup_blocked_notice(
     """
 
     try:
-        _message_box("Open Voice Bridge · RC003", message)
+        _message_box(title, message)
     except Exception:
         print(f"Open Voice Bridge RC003: {message}", file=sys.stderr)

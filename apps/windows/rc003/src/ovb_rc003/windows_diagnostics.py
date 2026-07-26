@@ -72,6 +72,7 @@ class CheckGroup(Enum):
     VOICE_BRIDGE = "voice_bridge"
     DICTATION = "dictation"
     OPTIONAL_DRIVER = "optional_driver"
+    EXTERNAL_MICROPHONE = "external_microphone"
 
 
 @dataclass(frozen=True)
@@ -1035,6 +1036,48 @@ def check_vb_cable_endpoints(
     )
 
 
+def check_dji_mic_2_input(
+    *,
+    list_recording: Callable[
+        [], Sequence[audio_output.AudioEndpoint]
+    ] = audio_output.enumerate_input_endpoints,
+) -> CheckResult:
+    """A paired Bluetooth device is not sufficient evidence. PASS only when
+    PortAudio can see a usable DJI Mic 2 recording endpoint right now.
+    """
+
+    try:
+        recording = list(list_recording())
+    except audio_output.AudioOutputUnavailableError:
+        return CheckResult(
+            "dji_mic_2_input",
+            "DJI Mic 2 录音输入",
+            CheckGroup.EXTERNAL_MICROPHONE,
+            CheckStatus.UNSUPPORTED,
+            "无法枚举 Windows 录音端点，暂不能核验 DJI Mic 2。",
+        )
+    matches = [e for e in recording if audio_output.is_dji_mic_2_input_endpoint(e.name)]
+    if not matches:
+        return CheckResult(
+            "dji_mic_2_input",
+            "DJI Mic 2 录音输入",
+            CheckGroup.EXTERNAL_MICROPHONE,
+            CheckStatus.FAIL,
+            "未发现可用的 DJI Mic 2 录音端点；请确认发射器已开机并在蓝牙设置中处于已连接状态。",
+        )
+    host_apis = {e.host_api for e in matches if e.host_api}
+    detail = "已发现可用的 DJI Mic 2 录音端点"
+    if host_apis:
+        detail += f"（{len(host_apis)} 个音频接口视图）"
+    return CheckResult(
+        "dji_mic_2_input",
+        "DJI Mic 2 录音输入",
+        CheckGroup.EXTERNAL_MICROPHONE,
+        CheckStatus.PASS,
+        detail + "；未修改 Windows 默认麦克风。",
+    )
+
+
 # -- Output endpoint resolution (voice bridge) ------------------------------
 
 
@@ -1164,7 +1207,7 @@ def run_diagnostics(
     leaving it to run to completion or to an unbounded process exit.
 
     Every check is isolated (see ``_isolated()``): one check's unexpected
-    failure can never prevent the other five from rendering their own real
+    failure can never prevent the other six from rendering their own real
     result - UNLESS ``cancel_event`` becomes set (XRBM-035 RETRY 1 P1 #2):
     once shutdown has been requested, this function stops running any
     FURTHER checks after whichever one just completed and returns
@@ -1176,7 +1219,7 @@ def run_diagnostics(
     the background worker thread takes to actually finish, for no
     observable benefit, working directly against the whole point of a
     bounded shutdown. With no ``cancel_event`` (the default), this early
-    stop never triggers and all six checks always run, unchanged.
+    stop never triggers and all seven checks always run.
     """
 
     ble_discover = functools.partial(
@@ -1202,6 +1245,12 @@ def run_diagnostics(
             "语音输出端点",
             CheckGroup.VOICE_BRIDGE,
             lambda: check_output_endpoint_resolution(saved_output_name, saved_output_host_api),
+        ),
+        (
+            "dji_mic_2_input",
+            "DJI Mic 2 录音输入",
+            CheckGroup.EXTERNAL_MICROPHONE,
+            check_dji_mic_2_input,
         ),
         ("dictation", "Windows 听写 (Win+H)", CheckGroup.DICTATION, check_dictation_manual),
     )

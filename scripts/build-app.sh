@@ -7,6 +7,11 @@ APP_NAME="XiaomiRemoteBridgeMac"
 DISPLAY_NAME="小米遥控器桥接"
 OUTPUT_DIR="$ROOT/dist"
 APP_DIR="$OUTPUT_DIR/$DISPLAY_NAME.app"
+# A persistent local identity keeps the designated requirement stable across
+# iterative installs, so macOS TCC does not treat every new binary as a new
+# app. Public/CI builds intentionally fall back to ad-hoc signing when this
+# optional identity is not present.
+LOCAL_SIGNING_IDENTITY="${OVB_CODESIGN_IDENTITY:-Open Voice Bridge Local Code Signing}"
 
 UNIVERSAL=0
 for arg in "$@"; do
@@ -57,7 +62,23 @@ ditto --norsrc --noextattr --noqtn --noacl \
 ditto --norsrc --noextattr --noqtn --noacl \
   "$ROOT/Resources/RC003-remote-photo.png" \
   "$APP_DIR/Contents/Resources/RC003-remote-photo.png"
-codesign --force --deep --sign - "$APP_DIR"
+ditto --norsrc --noextattr --noqtn --noacl \
+  "$ROOT/Resources/ARN9-remote-photo.png" \
+  "$APP_DIR/Contents/Resources/ARN9-remote-photo.png"
+ditto --norsrc --noextattr --noqtn --noacl \
+  "$ROOT/Resources/OpenVoiceBridge.icns" \
+  "$APP_DIR/Contents/Resources/OpenVoiceBridge.icns"
+ditto --norsrc --noextattr --noqtn --noacl \
+  "$ROOT/device-profiles" \
+  "$APP_DIR/Contents/Resources/device-profiles"
+AVAILABLE_SIGNING_IDENTITIES="$(security find-identity -v -p codesigning 2>/dev/null)"
+if rg -Fq "\"$LOCAL_SIGNING_IDENTITY\"" <<<"$AVAILABLE_SIGNING_IDENTITIES"; then
+  print "codesign identity: $LOCAL_SIGNING_IDENTITY"
+  codesign --force --deep --sign "$LOCAL_SIGNING_IDENTITY" "$APP_DIR"
+else
+  print "codesign identity: ad-hoc fallback"
+  codesign --force --deep --sign - "$APP_DIR"
+fi
 codesign --verify --deep --strict "$APP_DIR"
 
 print "$APP_DIR"

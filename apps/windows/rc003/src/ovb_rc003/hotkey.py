@@ -52,4 +52,9 @@ class HotkeySpec:
         return cls(modifiers=modifiers, key=keys[0])
 
 
-DEFAULT_VOICE_HOTKEY = HotkeySpec(modifiers=("win",), key="h")
+# A deliberately uncommon default for fresh installations. Users who rely on
+# Windows Voice Typing can change this back to ``win+h``; third-party input
+# methods can bind the same chord in their own shortcut settings. Existing
+# config files keep their saved value because config.load_config() merges them
+# over default_config().
+DEFAULT_VOICE_HOTKEY = HotkeySpec(modifiers=("ctrl", "shift"), key="u")

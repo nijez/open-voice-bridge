@@ -34,6 +34,7 @@ from typing import Dict, Optional, Tuple
 from . import (
     audio_output,
     bridge_launcher,
+    device_catalog,
     device_profile,
     hotkey,
     key_mapping,
@@ -56,12 +57,12 @@ _TRIGGER_MODE_LABELS = {
 # The exact display string for a "mic" (ActionKind.VOICE) button mapping.
 # _display_to_action must recognize this literal string and round-trip it
 # back to ActionKind.VOICE - it must NOT be handed to HotkeySpec.parse.
-_VOICE_DISPLAY = "语音 (Win+H，见下方热键设置)"
+_VOICE_DISPLAY = "语音（使用专用组合键）"
 
-# Shown on the read-only "mic" row (XRBM-019 In-scope item 6): reuses
-# _VOICE_DISPLAY's exact text plus a note explaining it isn't editable, so a
-# user doesn't wonder why "mic" alone has no dropdown.
-_MIC_ROW_DISPLAY = _VOICE_DISPLAY + "（固定，不可更改）"
+# The microphone button remains a VOICE lifecycle action (it cannot be changed
+# into an unrelated normal-key mapping), but the host chord it emits is
+# editable through SettingsController.hotkeyText in the same row.
+_MIC_ROW_DISPLAY = "触发语音（组合键可编辑）"
 
 # device_profile.ALL_BUTTON_IDS also carries "volume_mute", a HID usage-table
 # entry kept for protocol compatibility (see key_mapping.py's module
@@ -137,6 +138,7 @@ def build_save_model(
     endpoint_display_text: str,
     base_config: dict,
     base_bindings: dict,
+    selected_device_profile: str = device_catalog.RC003_ID,
 ) -> Tuple[dict, dict]:
     """Pure validation+build step for "Save"/"Restore defaults", with no Tk
     dependency at all - directly unit tested without constructing any
@@ -175,6 +177,9 @@ def build_save_model(
     endpoint_name, endpoint_host_api = _parse_endpoint_display(endpoint_display_text)
 
     new_config = dict(base_config)
+    new_config["selected_device_profile"] = device_catalog.normalize_device_id(
+        selected_device_profile
+    )
     new_config["voice_hotkey"] = hotkey_text.strip()
     new_config["voice_trigger_mode"] = trigger_mode.value
     new_config["output_endpoint_name"] = endpoint_name
