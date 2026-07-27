@@ -20,7 +20,7 @@ DJI 官方说明 Mic 2 接收器可以通过 USB-C 连接电脑；其发射器�
 macOS 会读取蓝牙 Device Information Service 的 Model Number（`0x2A24`）：`RC003` 对应 2 Pro，`ARN9` 对应普通款。设置窗口只展示当前实际识别到的设备；完整适配范围单独放在“支持设备”页。2 Pro 与 ARN9 因名称和协议相同而复用同一个小米适配器，但各自使用真实外观和按键集合：
 
 - 选 RC003：显示 BLE/HID/ATVV 桥接、BlackHole 语音输出、双击开关、Mac Fn 兼容和 13 键映射。
-- 选 ARN9 普通款：显示相同的 BLE/HID/ATVV 语音链路，以及没有 TV 键的普通款实物图和 12 个实体功能区（语音键固定，其他实体键可映射）。
+- 选 ARN9 普通款：显示相同的 BLE/HID/ATVV 语音链路，以及没有 TV 键的普通款实物图和 12 个实体功能区（包括语音键在内均可映射）。
 - 选 DJI Mic 2：只显示 macOS 系统录音输入检测、声音输入设置入口和 DJI 实体控制边界；不启动 RC003 桥接，不显示 BlackHole 和 13 键映射。
 
 ## 框架入口
@@ -36,7 +36,7 @@ Profile 只记录可核对的事实与状态，不是驱动。只有代码、自
 
 ## 第一个适配器：Xiaomi RC003 for macOS
 
-现有 `XiaomiRemoteBridgeMac` target、应用显示名和 Bundle ID 暂时保留，避免总项目改名导致已安装用户重新授予蓝牙、输入监控和辅助功能权限。历史 [v0.2.0 测试版](https://github.com/nijez/open-voice-bridge/releases/tag/v0.2.0) 继续代表最早公开的设备专用适配器；**当前 `main` 源码已经增加 Mac 物理 Fn 麦克风兼容、真正鼠标右键和语音键双击暂停/恢复，这些功能不包含在历史 v0.2.0 DMG 中。**
+现有 `XiaomiRemoteBridgeMac` target、应用显示名和 Bundle ID 暂时保留，避免总项目改名导致已安装用户重新授予蓝牙、输入监控和辅助功能权限。当前公开测试版为 [v0.3.6](https://github.com/nijez/open-voice-bridge/releases/tag/v0.3.6)，包含 Mac 物理 Fn 麦克风兼容、真正鼠标右键、语音键双击暂停/恢复，以及所有实体键的自定义快捷键录制。
 
 当前功能：
 
@@ -83,7 +83,7 @@ Profile 只记录可核对的事实与状态，不是驱动。只有代码、自
 3. 从动作菜单中选择新动作，修改后自动保存；
 4. 需要撤销所有自定义设置时，点击“恢复默认”。
 
-麦克风键固定用于 **RC003 语音 + Mac Fn/🌐︎ 长按**，不参与普通按键下拉映射。遥控器没有独立静音实体键；“系统静音”只是可分配给其他实体键的可选动作，不是默认映射。
+每个真实实体键都可以选择内置动作、禁用，或点击“录制自定义快捷键…”直接录入单键/组合键。麦克风键默认仍用于 **RC003 语音 + Mac Fn/🌐︎ 长按**；也可改成自定义的按住型宿主快捷键，应用会恢复设备 F5→Fn 映射并从原始 HID 按下/松开边沿注入该组合键，避免双发。遥控器没有独立静音实体键；“系统静音”只是可分配给其他实体键的可选动作，不是默认映射。
 
 ARN9 普通款使用同一语音/Fn 行为和同一套默认动作，但映射页会切换为黑色普通款实物图并隐藏不存在的 TV 键。它的真实单设备测试已确认两次完整的“按下 → ATVV 流启动 → 松开 → ATVV 流停止”。由于 2 Pro 与 ARN9 向 macOS 暴露相同名称、VID/PID 和固件号，**当前不要同时连接两只同名小米遥控器**；现版本还不能可靠保证 HID 与 BLE 选中同一个物理实例，双设备选择将在后续实例身份切片处理。
 
@@ -116,14 +116,14 @@ ARN9 普通款使用同一语音/Fn 行为和同一套默认动作，但映射�
 
 - macOS 11 Big Sur 或以上；
 - Apple Silicon 或 Intel Mac；
-- 小米蓝牙遥控器 2 Pro / RC003；
+- 小米蓝牙遥控器 2 Pro / RC003，或普通款 / ARN9；
 - 使用遥控器语音时，安装 [BlackHole 2ch](https://existential.audio/blackhole/) 或等价的 CoreAudio 回环设备。
 
 应用不会自动安装音频驱动，也不会修改系统默认输入/输出设备。
 
 #### 2. 下载并安装应用
 
-1. 如果只需要历史基础版，可从 [v0.2.0 测试版 Release](https://github.com/nijez/open-voice-bridge/releases/tag/v0.2.0) 下载 `xiaomi-remote-bridge-mac-0.2.0.dmg`；需要 Mac 物理 Fn 麦克风兼容、真正鼠标右键或语音键双击暂停/恢复时，请使用当前 `main` 源码构建，或等待这些功能对应的新测试 Release；
+1. 从 [v0.3.6 测试版 Release](https://github.com/nijez/open-voice-bridge/releases/tag/v0.3.6) 下载 `小米遥控器桥接-0.3.6-测试版.dmg`；
 2. 打开 DMG，把“小米遥控器桥接.app”拖到旁边的 `Applications`；
 3. 进入“应用程序”，按住 Control 单击“小米遥控器桥接”，选择“打开”；
 4. 如果系统仍然拦截：

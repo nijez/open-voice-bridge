@@ -68,6 +68,7 @@ final class HIDRemoteMonitor {
     private var repeatTimers: [UInt16: DispatchSourceTimer] = [:]
     private var permissionMonitor: DispatchSourceTimer?
     private var voiceKeyIsDown = false
+    private var heldVoiceChord = HeldKeyChordLatch()
     private var reconfiguring = false
     private var reportedReading = false
     /// Runtime action gate. When true (bridge runtime disabled) the monitor keeps
@@ -94,6 +95,10 @@ final class HIDRemoteMonitor {
     /// reader (HID monitor vs. standalone fallback) by real health instead of the
     /// `customMappingEnabled` checkbox.
     var onReaderHealthChange: (() -> Void)?
+    /// Final live-system mapping audit immediately before adopting a matching
+    /// device. This closes the race where the IOHID service appears after the
+    /// settings/model callback that initially prepared a custom voice binding.
+    var canAdoptDevice: (() -> Bool)?
 
     /// Whether the HID pipeline is a healthy F5 reader: the manager is open, so it
     /// watches the current AND all future RC003 devices (Apple `IOHIDManagerOpen`
@@ -112,6 +117,7 @@ final class HIDRemoteMonitor {
     /// can the disabled bridge fully suppress ordinary keys; otherwise the UI must
     /// honestly warn that native key behaviour may remain.
     var isExclusivelyReading: Bool { activeDevice != nil && activeDeviceIsSeized }
+    var isVoiceKeyPressed: Bool { voiceKeyIsDown }
 
     /// The present-device generation an input-report callback tags its report with,
     /// or `nil` when no device is present (so the report is dropped).
@@ -127,6 +133,7 @@ final class HIDRemoteMonitor {
         guard suppressed else { return }
         repeatTimers.values.forEach { $0.cancel() }
         repeatTimers.removeAll()
+        releaseHeldVoiceChord()
         // Forget held usages so a later release does not try to re-arm the
         // suppressor, and so no repeat can resume. Injected key/system events are
         // atomic down+up pairs, so there is no held synthetic key to release.
@@ -234,6 +241,7 @@ final class HIDRemoteMonitor {
         repeatTimers.values.forEach { $0.cancel() }
         repeatTimers.removeAll()
         activeUsages.removeAll()
+        releaseHeldVoiceChord()
         forceReleaseVoiceKey()
         eventSuppressor.stop()
         if let activeDevice {
@@ -269,6 +277,12 @@ final class HIDRemoteMonitor {
         // Ignore a stale match after the pipeline closed, or a second match while
         // a device is already owned under a live generation.
         guard manager != nil, !lifecycle.devicePresent else { return }
+
+        guard result != kIOReturnSuccess || canAdoptDevice?() != false else {
+            updateStatus("语音键系统映射无法安全协调；已拒绝读取设备")
+            AppLogger.shared.write("HID DEVICE ADOPTION rejected voice_mapping_audit")
+            return
+        }
 
         var openSucceeded = false
         var seized = false
@@ -382,22 +396,35 @@ final class HIDRemoteMonitor {
 
         for usage in pressed.sorted() {
             guard let button = RemoteButton.usageMap[usage] else { continue }
-            let action = settings.action(for: button)
+            let binding = settings.binding(for: button)
             if !activeDeviceIsSeized {
                 eventSuppressor.arm(button: button, edge: .down)
             }
-            if !KeyboardInjector.send(action) {
+            let delivered: Bool
+            if button == .microphone, case let .shortcut(chord) = binding {
+                delivered = KeyboardInjector.send(chord, edge: .down)
+                if delivered { heldVoiceChord.press(chord) }
+            } else {
+                delivered = KeyboardInjector.send(binding)
+            }
+            if !delivered {
                 stop()
                 updateStatus("辅助功能权限已失效；已释放遥控器")
                 return
             }
-            startRepeatIfNeeded(usage: usage, button: button, action: action)
-            AppLogger.shared.write("HID BUTTON down=\(button.rawValue) action=\(action.rawValue)")
+            startRepeatIfNeeded(usage: usage, button: button, binding: binding)
+            AppLogger.shared.write("HID BUTTON down=\(button.rawValue) action=\(binding.displayName)")
         }
 
         for usage in released {
             if !activeDeviceIsSeized, let button = RemoteButton.usageMap[usage] {
                 eventSuppressor.arm(button: button, edge: .up)
+            }
+            if RemoteButton.usageMap[usage] == .microphone,
+               !releaseHeldVoiceChord() {
+                stop()
+                updateStatus("辅助功能权限已失效；已释放遥控器")
+                return
             }
             repeatTimers.removeValue(forKey: usage)?.cancel()
         }
@@ -406,12 +433,12 @@ final class HIDRemoteMonitor {
     private func startRepeatIfNeeded(
         usage: UInt16,
         button: RemoteButton,
-        action: ButtonAction
+        binding: ButtonBinding
     ) {
         let repeatable: Set<RemoteButton> = [
             .up, .down, .left, .right, .back, .volumeUp, .volumeDown,
         ]
-        guard repeatable.contains(button), action != .disabled else { return }
+        guard repeatable.contains(button), !binding.isDisabled else { return }
 
         let timer = DispatchSource.makeTimerSource(queue: .main)
         let interval: DispatchTimeInterval = button == .back ? .milliseconds(50) : .milliseconds(100)
@@ -425,7 +452,7 @@ final class HIDRemoteMonitor {
             if !self.activeDeviceIsSeized {
                 self.eventSuppressor.arm(button: button, edge: .down)
             }
-            if !KeyboardInjector.send(action) {
+            if !KeyboardInjector.send(binding) {
                 self.releaseForRevokedPermissions()
             }
         }
@@ -439,6 +466,7 @@ final class HIDRemoteMonitor {
     /// balancing `.up` is emitted. A genuine key-up parsed from a report never comes
     /// through here, so a real second tap still toggles.
     private func forceReleaseVoiceKey() {
+        _ = releaseHeldVoiceChord()
         for effect in RemoteVoiceKeyForcedRelease.effects(keyHeld: voiceKeyIsDown) {
             switch effect {
             case .invalidateGesture:
@@ -447,6 +475,13 @@ final class HIDRemoteMonitor {
                 voiceKeyIsDown = false
                 onVoiceKeyEdge?(.up)
             }
+        }
+    }
+
+    @discardableResult
+    private func releaseHeldVoiceChord() -> Bool {
+        heldVoiceChord.release { chord in
+            KeyboardInjector.send(chord, edge: .up)
         }
     }
 

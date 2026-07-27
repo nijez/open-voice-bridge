@@ -277,6 +277,21 @@ class HostHotkeyFailureSuppressesMicOpenTests(_AppWiringTestCase):
         self.assertTrue(self.app._voice.active)
 
 
+class CorruptButtonBindingFailsClosedTests(_AppWiringTestCase):
+    def test_unknown_or_malformed_binding_does_not_escape_raw_input_callback(self):
+        for malformed in (
+            {"kind": "unknown", "keys": []},
+            {"kind": "key_combo", "keys": ["not_a_real_key"]},
+            {"kind": "key_combo", "keys": "ctrl+a"},
+            {},
+            "not-a-mapping",
+        ):
+            self.app._bindings = {"bindings": {"back": malformed}}
+            self.app._on_button_event("back", True)
+
+        self.assertFalse(self.app._voice.active)
+
+
 class PlaybackWriteFailureTests(_AppWiringTestCase):
     """XRBM-014 review round 2 P1 #6: a playback write failure must fail
     closed (discard the sink) and request a reconnect, not log indefinitely

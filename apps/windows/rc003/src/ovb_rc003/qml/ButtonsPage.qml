@@ -17,6 +17,122 @@ Item {
 
     readonly property real photoAspectRatio: 1030 / 508
 
+    function openShortcutRecorder(buttonId, rowIndex, isMic) {
+        shortcutRecorder.buttonId = buttonId
+        shortcutRecorder.rowIndex = rowIndex
+        shortcutRecorder.isMic = isMic
+        shortcutRecorder.previewText = qsTr("请按下快捷键")
+        shortcutRecorder.open()
+    }
+
+    Dialog {
+        id: shortcutRecorder
+        objectName: "shortcutRecorderDialog"
+        modal: true
+        anchors.centerIn: parent
+        width: 430
+        title: qsTr("录制自定义快捷键")
+        standardButtons: Dialog.Cancel
+        property string buttonId: ""
+        property int rowIndex: -1
+        property bool isMic: false
+        property string previewText: ""
+
+        onOpened: captureArea.forceActiveFocus()
+
+        function keyName(key) {
+            if (key >= Qt.Key_A && key <= Qt.Key_Z)
+                return String.fromCharCode(key).toLowerCase()
+            if (key >= Qt.Key_0 && key <= Qt.Key_9)
+                return String.fromCharCode(key)
+            if (key >= Qt.Key_F1 && key <= Qt.Key_F24)
+                return "f" + (key - Qt.Key_F1 + 1)
+            switch (key) {
+            case Qt.Key_Escape: return "escape"
+            case Qt.Key_Return: case Qt.Key_Enter: return "enter"
+            case Qt.Key_Backspace: return "backspace"
+            case Qt.Key_Tab: return "tab"
+            case Qt.Key_Space: return "space"
+            case Qt.Key_Left: return "left"
+            case Qt.Key_Right: return "right"
+            case Qt.Key_Up: return "up"
+            case Qt.Key_Down: return "down"
+            case Qt.Key_Home: return "home"
+            case Qt.Key_End: return "end"
+            case Qt.Key_PageUp: return "page_up"
+            case Qt.Key_PageDown: return "page_down"
+            case Qt.Key_Insert: return "insert"
+            case Qt.Key_Delete: return "delete"
+            case Qt.Key_Minus: return "minus"
+            case Qt.Key_Equal: return "equals"
+            case Qt.Key_Comma: return "comma"
+            case Qt.Key_Period: return "period"
+            case Qt.Key_Slash: return "slash"
+            case Qt.Key_Backslash: return "backslash"
+            case Qt.Key_Semicolon: return "semicolon"
+            case Qt.Key_Apostrophe: return "quote"
+            case Qt.Key_BracketLeft: return "left_bracket"
+            case Qt.Key_BracketRight: return "right_bracket"
+            default: return ""
+            }
+        }
+
+        function acceptShortcut(event) {
+            if (event.key === Qt.Key_Control || event.key === Qt.Key_Shift
+                    || event.key === Qt.Key_Alt || event.key === Qt.Key_Meta) {
+                event.accepted = true
+                return
+            }
+            var key = keyName(event.key)
+            if (key.length === 0) {
+                previewText = qsTr("这个键暂不支持，请换一个键")
+                event.accepted = true
+                return
+            }
+            var parts = []
+            if (event.modifiers & Qt.ControlModifier) parts.push("ctrl")
+            if (event.modifiers & Qt.ShiftModifier) parts.push("shift")
+            if (event.modifiers & Qt.AltModifier) parts.push("alt")
+            if (event.modifiers & Qt.MetaModifier) parts.push("win")
+            parts.push(key)
+            var chord = parts.join("+")
+            previewText = chord
+            if (isMic)
+                SettingsController.hotkeyText = chord
+            else
+                ButtonMappingModel.setActionTextAt(rowIndex, chord)
+            event.accepted = true
+            close()
+        }
+
+        contentItem: FocusScope {
+            id: captureArea
+            implicitHeight: 150
+            focus: true
+            Keys.onPressed: function(event) { shortcutRecorder.acceptShortcut(event) }
+
+            ColumnLayout {
+                anchors.fill: parent
+                spacing: tokens.spacingMedium
+                Label {
+                    Layout.fillWidth: true
+                    horizontalAlignment: Text.AlignHCenter
+                    text: shortcutRecorder.previewText
+                    font.pixelSize: tokens.fontSizeTitle
+                    color: tokens.accent
+                }
+                Label {
+                    Layout.fillWidth: true
+                    wrapMode: Text.WordWrap
+                    horizontalAlignment: Text.AlignHCenter
+                    text: qsTr("按一个单键，或按住 Ctrl、Shift、Alt、Win 后再按一个键。")
+                    color: tokens.textSecondary
+                    font.pixelSize: tokens.fontSizeSmall
+                }
+            }
+        }
+    }
+
     RowLayout {
         id: rc003MappingLayout
         objectName: "rc003MappingLayout"
@@ -141,7 +257,7 @@ Item {
                 Layout.alignment: Qt.AlignHCenter
                 wrapMode: Text.WordWrap
                 horizontalAlignment: Text.AlignHCenter
-                text: qsTr("点击实物按键定位映射；麦克风键固定为语音，遥控器没有独立的实体静音键。")
+                text: qsTr("点击实物按键定位映射；普通键可直接输入任意组合键，麦克风键的语音组合键也可编辑。遥控器没有独立静音键。")
                 color: tokens.textSecondary
                 font.pixelSize: tokens.fontSizeSmall
             }
@@ -285,7 +401,7 @@ Item {
                                 id: voiceHotkeyField
                                 Layout.fillWidth: true
                                 text: SettingsController.hotkeyText
-                                placeholderText: qsTr("例如 ctrl+shift+u 或 win+h")
+                                placeholderText: qsTr("直接输入，例如 ctrl+shift+u 或 win+h")
                                 selectByMouse: true
                                 onEditingFinished: SettingsController.hotkeyText = text
                                 Accessible.name: qsTr("语音键组合键")
@@ -312,6 +428,8 @@ Item {
                             editable: true
                             model: SettingsController.presetActionOptions
                             Accessible.name: mappingRow.displayName
+                            ToolTip.visible: hovered
+                            ToolTip.text: qsTr("可直接输入任意单键或组合键，例如 f8、ctrl+shift+p；输入“禁用”可关闭此键。")
 
                             // Guards onEditTextChanged below against the
                             // SAME construction-time noise
@@ -372,6 +490,17 @@ Item {
                             // a dropdown item, both change editText too).
                             onAccepted: ButtonMappingModel.setActionTextAt(mappingRow.index, editText)
                             onActivated: ButtonMappingModel.setActionTextAt(mappingRow.index, currentText)
+                        }
+
+                        Button {
+                            objectName: "recordShortcut_" + mappingRow.buttonId
+                            text: qsTr("录制")
+                            onClicked: root.openShortcutRecorder(
+                                mappingRow.buttonId,
+                                mappingRow.index,
+                                mappingRow.isMic
+                            )
+                            Accessible.name: qsTr("录制") + mappingRow.displayName + qsTr("快捷键")
                         }
                     }
                 }

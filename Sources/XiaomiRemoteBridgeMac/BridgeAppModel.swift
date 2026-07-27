@@ -65,6 +65,7 @@ final class BridgeAppModel: ObservableObject, XiaomiBluetoothBridgeDelegate {
     /// launch; the next launch always rechecks it from scratch.
     private var suppressedHIDPermissionReminderForCurrentLaunch: HIDPermissionRequest?
     private var voiceFunctionKeyLatch = VoiceFunctionKeyLatch()
+    private var remoteVoiceKeyIsDown = false
     /// Recognises the RC003 voice-key double-click that toggles the bridge. It only
     /// observes the single voice-key edge stream, so it never delays hold-to-talk.
     private var toggleDetector = RemoteBridgeToggleGestureDetector()
@@ -96,6 +97,9 @@ final class BridgeAppModel: ObservableObject, XiaomiBluetoothBridgeDelegate {
         // choice tracks real reader health at runtime, not the mapping checkbox.
         monitor.onReaderHealthChange = { [weak self] in
             self?.updateRemoteVoiceKeyObservation()
+        }
+        monitor.canAdoptDevice = { [weak self] in
+            self?.prepareVoiceMappingForHIDAdoption() ?? false
         }
         return monitor
     }()
@@ -336,6 +340,7 @@ final class BridgeAppModel: ObservableObject, XiaomiBluetoothBridgeDelegate {
     /// detector. The detector only *observes* the edge, so hold-to-talk voice
     /// startup keeps its original latency — no waiting for a possible second tap.
     private func handleRemoteVoiceKeyEdge(_ edge: RemoteEventEdge) {
+        remoteVoiceKeyIsDown = edge == .down
         localMicBridge.noteRemoteSource(edge)
         guard settings.doubleClickToggleEnabled else { return }
         if toggleDetector.handle(edge, nowMs: Self.monotonicMillis()) {
@@ -662,6 +667,10 @@ final class BridgeAppModel: ObservableObject, XiaomiBluetoothBridgeDelegate {
         detectedXiaomiModelNumber = normalized
         if let detectedVariant = XiaomiRemoteVariant.detected(fromModelNumber: normalized) {
             settings.xiaomiRemoteVariant = detectedVariant
+            // Reconcile the device-scoped F5 mapping BEFORE opening the HID
+            // action pipeline. A saved custom voice chord must never become
+            // injectable until F5→Fn restoration has succeeded.
+            _ = applyVoiceFunctionMapping()
             applyHIDSettings()
             refreshHIDPermissionReminder()
         }
@@ -718,22 +727,111 @@ final class BridgeAppModel: ObservableObject, XiaomiBluetoothBridgeDelegate {
         audioPathSnapshot = snapshot
     }
 
-    private func applyVoiceFunctionMapping() {
+    @discardableResult
+    private func applyVoiceFunctionMapping() -> Bool {
         // While the bridge is disabled the F5 key must stay native (its system
         // mapping was restored on disable); do not re-map it even if the device
         // (re)connects. Re-enabling re-applies the mapping through this same path.
         guard bridgeEnabled,
               let modelNumber = detectedXiaomiModelNumber,
               XiaomiRemoteVariant.detected(fromModelNumber: modelNumber) != nil
-        else { return }
+        else { return true }
+        let binding = settings.binding(for: .microphone)
+        if case .hardwareFn = binding {
+            // Keep the proven device-scoped F5→Fn path for the default voice
+            // behaviour. Custom microphone chords are injected from raw HID
+            // down/up edges instead, so restore this mapping first to avoid
+            // delivering both Fn and the chosen chord.
+        } else {
+            _ = voiceFunctionKeyLatch.transition(streaming: false)
+            guard voiceFunctionMapper.prepareForCustom() else {
+                _ = fallBackToHardwareFn(reason: "live_mapping_audit_failed")
+                return false
+            }
+            voiceShortcutStatus = "语音键使用自定义快捷键：\(binding.displayName)"
+            return true
+        }
         let applied = voiceFunctionMapper.apply()
-        guard !isStreaming else { return }
+        guard !isStreaming else { return true }
         voiceShortcutStatus = applied
             ? "遥控器语音键已硬件映射为 Fn"
             : "等待遥控器 Fn 硬件映射"
+        return true
+    }
+
+    /// Rechecks the actual IOHID service at device-adoption time. A custom
+    /// microphone binding is allowed only after a stale project-owned F5→Fn has
+    /// been removed and read back successfully. Any ambiguity falls back to the
+    /// proven hardware-Fn mode before ordinary HID reports can be consumed.
+    private func prepareVoiceMappingForHIDAdoption() -> Bool {
+        guard bridgeEnabled else { return true }
+        guard case .hardwareFn = settings.binding(for: .microphone) else {
+            guard voiceFunctionMapper.prepareForCustom(requirePresentTarget: true) else {
+                return fallBackToHardwareFn(reason: "device_adoption_audit_failed")
+            }
+            return true
+        }
+        return true
+    }
+
+    @discardableResult
+    private func fallBackToHardwareFn(reason: String) -> Bool {
+        settings.setBinding(.hardwareFn, for: .microphone)
+        let reconciled = voiceFunctionMapper.apply()
+        voiceShortcutStatus = reconciled
+            ? "自定义语音键未通过安全校验；已恢复硬件 Fn"
+            : "语音键映射安全校验失败；已停止读取遥控器"
+        AppLogger.shared.write(
+            "VOICE CUSTOM MAPPING rejected reason=\(reason) fallback_fn=\(reconciled)"
+        )
+        return reconciled
+    }
+
+    @discardableResult
+    func setVoiceKeyBinding(_ binding: ButtonBinding) -> Bool {
+        guard VoiceBindingChangeGate.canChange(
+            isStreaming: isStreaming,
+            physicalKeyDown: remoteVoiceKeyIsDown
+        ) else {
+            voiceShortcutStatus = "语音键仍在按住或语音进行中；松开并结束后再修改"
+            return false
+        }
+        guard settings.binding(for: .microphone) != binding else { return true }
+
+        // Close the injector first. The gate above proves there is no live
+        // physical/custom hold to strand while the device mapping changes.
+        hidMonitor.stop()
+        settings.setBinding(binding, for: .microphone)
+        if case .hardwareFn = binding {
+        } else {
+            settings.customMappingEnabled = true
+        }
+        let accepted = applyVoiceFunctionMapping()
+        applyHIDSettings()
+        return accepted
+    }
+
+    @discardableResult
+    func resetButtonBindings() -> Bool {
+        guard VoiceBindingChangeGate.canChange(
+            isStreaming: isStreaming,
+            physicalKeyDown: remoteVoiceKeyIsDown
+        ) else {
+            voiceShortcutStatus = "语音键仍在按住或语音进行中；结束后再恢复默认"
+            return false
+        }
+        hidMonitor.stop()
+        settings.resetBindings()
+        _ = applyVoiceFunctionMapping()
+        applyHIDSettings()
+        return true
     }
 
     private func updateVoiceFunctionKeyState(streaming: Bool) {
+        guard case .hardwareFn = settings.binding(for: .microphone) else {
+            voiceShortcutStatus = "语音键使用自定义快捷键：\(settings.binding(for: .microphone).displayName)"
+            return
+        }
         guard let transition = voiceFunctionKeyLatch.transition(streaming: streaming) else { return }
         let shouldHold = transition == .press
         voiceShortcutStatus = shouldHold

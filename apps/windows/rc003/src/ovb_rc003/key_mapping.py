@@ -32,6 +32,7 @@ from typing import Dict, Tuple
 
 
 class ActionKind(str, Enum):
+    DISABLED = "disabled"
     KEY_COMBO = "key_combo"
     SYSTEM_VOLUME_UP = "system_volume_up"
     SYSTEM_VOLUME_DOWN = "system_volume_down"
@@ -53,7 +54,20 @@ class ButtonAction:
 
     @classmethod
     def from_dict(cls, data: dict) -> "ButtonAction":
-        return cls(kind=ActionKind(data["kind"]), keys=tuple(data.get("keys", ())))
+        if not isinstance(data, dict):
+            raise TypeError("button action must be a mapping")
+        kind = ActionKind(data["kind"])
+        raw_keys = data.get("keys", ())
+        if not isinstance(raw_keys, (list, tuple)) or not all(
+            isinstance(key, str) and key.strip() for key in raw_keys
+        ):
+            raise ValueError("button action keys must be non-empty strings")
+        keys = tuple(key.strip().lower() for key in raw_keys)
+        if kind == ActionKind.KEY_COMBO and not keys:
+            raise ValueError("key_combo action must contain at least one key")
+        if kind != ActionKind.KEY_COMBO and keys:
+            raise ValueError("non-key action must not contain keys")
+        return cls(kind=kind, keys=keys)
 
 
 # Buttons that have a defined default action out of the box. "volume_mute" is

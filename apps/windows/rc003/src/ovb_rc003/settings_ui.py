@@ -39,6 +39,7 @@ from . import (
     hotkey,
     key_mapping,
     logging_setup,
+    win32_keys,
 )
 
 # Preset key-combo choices shown in the mapping dropdown, covering every
@@ -46,7 +47,7 @@ from . import (
 # is also accepted via hotkey.HotkeySpec.parse.
 _PRESET_KEY_COMBOS = (
     "escape", "enter", "backspace", "up", "down", "left", "right",
-    "win+d", "shift+f10", "alt+esc", "tab", "space",
+    "win+d", "shift+f10", "alt+esc", "tab", "space", "禁用",
 )
 
 _TRIGGER_MODE_LABELS = {
@@ -89,6 +90,8 @@ class SettingsValidationError(Exception):
 
 
 def _action_to_display(action: key_mapping.ButtonAction) -> str:
+    if action.kind == key_mapping.ActionKind.DISABLED:
+        return "禁用"
     if action.kind == key_mapping.ActionKind.VOICE:
         return _VOICE_DISPLAY
     if action.kind == key_mapping.ActionKind.SYSTEM_VOLUME_UP:
@@ -100,6 +103,8 @@ def _action_to_display(action: key_mapping.ButtonAction) -> str:
 
 def _display_to_action(text: str) -> key_mapping.ButtonAction:
     text = text.strip()
+    if text in ("禁用", "disabled"):
+        return key_mapping.ButtonAction(key_mapping.ActionKind.DISABLED)
     if text == _VOICE_DISPLAY:
         return key_mapping.ButtonAction(key_mapping.ActionKind.VOICE)
     if text in ("系统音量 +",):
@@ -107,6 +112,10 @@ def _display_to_action(text: str) -> key_mapping.ButtonAction:
     if text in ("系统音量 −", "系统音量 -"):
         return key_mapping.ButtonAction(key_mapping.ActionKind.SYSTEM_VOLUME_DOWN)
     parsed = hotkey.HotkeySpec.parse(text)
+    try:
+        win32_keys.resolve_vk_codes(tuple(parsed.modifiers) + (parsed.key,))
+    except win32_keys.UnknownKeyTokenError as exc:
+        raise hotkey.HotkeyParseError(str(exc)) from exc
     return key_mapping.ButtonAction(
         key_mapping.ActionKind.KEY_COMBO, tuple(parsed.modifiers) + (parsed.key,)
     )
@@ -147,8 +156,11 @@ def build_save_model(
     """
 
     try:
-        hotkey.HotkeySpec.parse(hotkey_text)
+        parsed_hotkey = hotkey.HotkeySpec.parse(hotkey_text)
+        win32_keys.resolve_vk_codes(tuple(parsed_hotkey.modifiers) + (parsed_hotkey.key,))
     except hotkey.HotkeyParseError as exc:
+        raise SettingsValidationError(None, str(exc)) from exc
+    except win32_keys.UnknownKeyTokenError as exc:
         raise SettingsValidationError(None, str(exc)) from exc
 
     bindings: Dict[str, dict] = {}

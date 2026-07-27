@@ -22,6 +22,7 @@ struct SettingsView: View {
     @ObservedObject var settings: AppSettings
     @ObservedObject var launchAtLogin: LaunchAtLoginManager
     @State private var selectedRemoteButton: RemoteButton = .ok
+    @State private var recordingRemoteButton: RemoteButton?
     @State private var bridgeHelpPresented = false
     @State private var audioDiagnosticsExpanded = false
     @State private var localFnHelpExpanded = false
@@ -426,8 +427,9 @@ struct SettingsView: View {
                         }
                         Spacer()
                         Button("恢复默认") {
-                            settings.resetBindings()
-                            selectedRemoteButton = .ok
+                            if model.resetButtonBindings() {
+                                selectedRemoteButton = .ok
+                            }
                         }
                     }
 
@@ -451,6 +453,20 @@ struct SettingsView: View {
             }
         }
         .padding(4)
+        .sheet(item: $recordingRemoteButton) { button in
+            ShortcutRecorderView(
+                button: button,
+                onCancel: { recordingRemoteButton = nil },
+                onClear: {
+                    setBinding(.preset(.disabled), for: button)
+                    recordingRemoteButton = nil
+                },
+                onRecord: { chord in
+                    setBinding(.shortcut(chord), for: button)
+                    recordingRemoteButton = nil
+                }
+            )
+        }
     }
 
     private var djiControlsTab: some View {
@@ -511,16 +527,27 @@ struct SettingsView: View {
 
             Spacer(minLength: 8)
 
-            Picker("", selection: Binding(
-                get: { settings.action(for: button) },
-                set: { settings.setAction($0, for: button) }
-            )) {
-                ForEach(ButtonAction.allCases) { action in
-                    Text(action.displayName).tag(action)
+            Menu {
+                if button == .microphone {
+                    Button("硬件 Fn（默认语音）") { setBinding(.hardwareFn, for: button) }
+                    Button("禁用") { setBinding(.preset(.disabled), for: button) }
+                } else {
+                    ForEach(ButtonAction.allCases) { action in
+                        Button(action.displayName) { setBinding(.preset(action), for: button) }
+                    }
                 }
+                Divider()
+                Button("录制自定义快捷键…") { recordingRemoteButton = button }
+            } label: {
+                HStack(spacing: 6) {
+                    Text(settings.binding(for: button).displayName).lineLimit(1)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+                .frame(width: 208, alignment: .leading)
             }
-            .labelsHidden()
-            .frame(width: 208)
+            .menuStyle(.borderlessButton)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
@@ -539,6 +566,14 @@ struct SettingsView: View {
                     lineWidth: 1
                 )
         )
+    }
+
+    private func setBinding(_ binding: ButtonBinding, for button: RemoteButton) {
+        if button == .microphone {
+            _ = model.setVoiceKeyBinding(binding)
+        } else {
+            settings.setBinding(binding, for: button)
+        }
     }
 
     private var permissionsTab: some View {
@@ -1144,7 +1179,7 @@ private struct RemoteControlDiagram: View {
                     .stroke(Color.secondary.opacity(0.20), lineWidth: 1)
             )
 
-            Text("点击实物按键定位映射；麦克风键固定为硬件语音/Fn。")
+            Text("点击实物按键定位映射；包括语音键在内均可自定义快捷键。")
                 .font(.system(size: 10))
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
@@ -1222,19 +1257,25 @@ private struct RemoteControlDiagram: View {
         width: CGFloat,
         height: CGFloat
     ) -> some View {
-        Circle()
-            .fill(voiceActive ? Color.orange.opacity(0.30) : Color.clear)
-            .overlay(
-                Circle().stroke(
-                    voiceActive ? Color.orange : Color.clear,
-                    lineWidth: 2
+        Button { selectedButton = .microphone } label: {
+            Circle()
+                .fill(
+                    voiceActive
+                        ? Color.orange.opacity(0.30)
+                        : selectedButton == .microphone ? Color.accentColor.opacity(0.27) : Color.clear
                 )
-            )
-            .contentShape(Circle())
-            .frame(width: 210 * width, height: 426 * height)
-            .position(x: 210 * x, y: 426 * y)
-        .help("遥控器真实 F5 硬件按下/松开会映射为 Mac Fn；同时桥接 ATVV 语音")
-        .accessibilityElement()
-        .accessibilityLabel(Text("语音/Fn 键，固定核心功能"))
+                .overlay(
+                    Circle().stroke(
+                        voiceActive ? Color.orange : selectedButton == .microphone ? Color.accentColor : Color.clear,
+                        lineWidth: 2
+                    )
+                )
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .frame(width: 210 * width, height: 426 * height)
+        .position(x: 210 * x, y: 426 * y)
+        .help("语音键：默认硬件 Fn，也可录制自定义快捷键")
+        .accessibilityLabel(Text("语音键"))
     }
 }

@@ -60,6 +60,63 @@ enum KeyboardInjector {
         return true
     }
 
+    @discardableResult
+    static func send(_ binding: ButtonBinding) -> Bool {
+        switch binding {
+        case let .preset(action): return send(action)
+        case let .shortcut(chord): return send(chord, edge: nil)
+        case .hardwareFn: return true
+        }
+    }
+
+    /// Sends either one edge (for a hold-style binding such as the microphone
+    /// key) or an atomic tap. Every event is constructed before anything is
+    /// posted, so construction failure cannot leave a half-delivered chord.
+    @discardableResult
+    static func send(_ chord: KeyChord, edge: RemoteEventEdge?) -> Bool {
+        guard chord.isValid,
+              isAccessibilityTrusted,
+              let source = CGEventSource(stateID: .hidSystemState)
+        else { return false }
+        let flags = cgFlags(for: chord.modifiers)
+
+        func makeEvent(isDown: Bool) -> CGEvent? {
+            guard let event = CGEvent(
+                keyboardEventSource: source,
+                virtualKey: CGKeyCode(chord.keyCode),
+                keyDown: isDown
+            ) else { return nil }
+            event.flags = flags
+            event.setIntegerValueField(.eventSourceUserData, value: syntheticEventMarker)
+            return event
+        }
+
+        switch edge {
+        case .down:
+            guard let event = makeEvent(isDown: true) else { return false }
+            event.post(tap: .cghidEventTap)
+        case .up:
+            guard let event = makeEvent(isDown: false) else { return false }
+            event.post(tap: .cghidEventTap)
+        case nil:
+            guard let down = makeEvent(isDown: true),
+                  let up = makeEvent(isDown: false)
+            else { return false }
+            down.post(tap: .cghidEventTap)
+            up.post(tap: .cghidEventTap)
+        }
+        return true
+    }
+
+    private static func cgFlags(for modifiers: KeyChord.Modifiers) -> CGEventFlags {
+        var flags: CGEventFlags = []
+        if modifiers.contains(.command) { flags.insert(.maskCommand) }
+        if modifiers.contains(.control) { flags.insert(.maskControl) }
+        if modifiers.contains(.option) { flags.insert(.maskAlternate) }
+        if modifiers.contains(.shift) { flags.insert(.maskShift) }
+        return flags
+    }
+
     private static func postKey(code: CGKeyCode, flags: CGEventFlags = []) {
         guard let source = CGEventSource(stateID: .hidSystemState),
               let down = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: true),

@@ -7,6 +7,9 @@ class HotkeySpecTests(unittest.TestCase):
     def test_default_voice_hotkey_uses_the_uncommon_configurable_chord(self):
         self.assertEqual(hotkey.DEFAULT_VOICE_HOTKEY.serialize(), "ctrl+shift+u")
 
+    def test_duplicate_modifiers_are_normalized(self):
+        self.assertEqual(hotkey.HotkeySpec.parse("ctrl+ctrl+shift+p").serialize(), "ctrl+shift+p")
+
     def test_parse_and_serialize_round_trip(self):
         spec = hotkey.HotkeySpec.parse("win+h")
         self.assertEqual(spec.modifiers, ("win",))

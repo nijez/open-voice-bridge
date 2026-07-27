@@ -21,6 +21,11 @@ class ResolveVkCodesTests(unittest.TestCase):
         with self.assertRaises(win32_keys.UnknownKeyTokenError):
             win32_keys.resolve_vk_codes(["not_a_real_key"])
 
+    def test_full_function_and_navigation_key_range_resolves(self):
+        self.assertEqual(win32_keys.resolve_vk_codes(["f1", "f24"]), [0x70, 0x87])
+        for token in ("home", "end", "page_up", "page_down", "insert", "delete"):
+            self.assertIn(token, win32_keys.VK_CODES)
+
     def test_all_default_mapping_tokens_resolve(self):
         # Every key token used by key_mapping.default_button_actions() and the
         # default voice hotkey must be resolvable, or button/voice actions

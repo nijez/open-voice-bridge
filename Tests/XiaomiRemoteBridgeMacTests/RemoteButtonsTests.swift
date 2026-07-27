@@ -28,6 +28,7 @@ struct RemoteButtonsTests {
 
     @Test func usesVerifiedRC003UsageTable() {
         #expect(RemoteButton.usageMap == [
+            0x3E: .microphone,
             0x28: .ok,
             0x35: .tv,
             0x4A: .home,
@@ -179,8 +180,9 @@ struct RemoteButtonsTests {
     }
 
     @Test func menuDefaultBindingStaysContextMenu() {
-        #expect(AppSettings.defaultBindings[.menu] == .contextMenu)
-        #expect(AppSettings.defaultBindings[.tv] == .appSwitcher)
+        #expect(AppSettings.defaultBindings[.menu] == .preset(.contextMenu))
+        #expect(AppSettings.defaultBindings[.tv] == .preset(.appSwitcher))
+        #expect(AppSettings.defaultBindings[.microphone] == .hardwareFn)
     }
 
     @Test func legacyActionJSONStillDecodesToSameActions() throws {
@@ -201,5 +203,39 @@ struct RemoteButtonsTests {
 
         #expect(settings.action(for: .menu) == .mouseRightClick)
         #expect(settings.action(for: .tv) == .appSwitcher)
+    }
+
+    @Test func customShortcutBindingPersistsAndMergesDefaults() throws {
+        let suiteName = "XiaomiRemoteBridgeMacTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let chord = KeyChord(keyCode: 35, keyLabel: "P", modifiers: [.command, .shift])
+        let saved: [String: ButtonBinding] = [
+            RemoteButton.menu.rawValue: .shortcut(chord),
+            RemoteButton.microphone.rawValue: .shortcut(chord),
+        ]
+        defaults.set(try JSONEncoder().encode(saved), forKey: "buttonBindingsV2")
+
+        let settings = AppSettings(defaults: defaults)
+        #expect(settings.binding(for: .menu) == .shortcut(chord))
+        #expect(settings.binding(for: .microphone) == .shortcut(chord))
+        #expect(settings.binding(for: .back) == .preset(.deleteBackward))
+        #expect(chord.displayName == "⇧⌘P")
+    }
+
+    @Test func heldCustomChordRetainsStateUntilReleaseDeliverySucceeds() {
+        let chord = KeyChord(keyCode: 35, keyLabel: "P", modifiers: [.command])
+        var latch = HeldKeyChordLatch()
+        latch.press(chord)
+        #expect(!latch.release { _ in false })
+        #expect(latch.chord == chord)
+        #expect(latch.release { _ in true })
+        #expect(!latch.isHeld)
+    }
+
+    @Test func voiceBindingChangesFailClosedWhileHeldOrStreaming() {
+        #expect(VoiceBindingChangeGate.canChange(isStreaming: false, physicalKeyDown: false))
+        #expect(!VoiceBindingChangeGate.canChange(isStreaming: true, physicalKeyDown: false))
+        #expect(!VoiceBindingChangeGate.canChange(isStreaming: false, physicalKeyDown: true))
     }
 }

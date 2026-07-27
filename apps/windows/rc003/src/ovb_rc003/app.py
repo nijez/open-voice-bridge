@@ -73,6 +73,7 @@ from . import (
     raw_input_windows,
     voice_controller,
     win32_input,
+    win32_keys,
 )
 from .atvv_session import AudioStarted, AudioStopped, MicButtonPressed
 
@@ -278,11 +279,22 @@ class RC003App:
         action_dict = self._bindings.get("bindings", {}).get(button_id)
         if action_dict is None:
             return
-        action = key_mapping.ButtonAction.from_dict(action_dict)
+        try:
+            action = key_mapping.ButtonAction.from_dict(action_dict)
+            if action.kind == key_mapping.ActionKind.KEY_COMBO:
+                win32_keys.resolve_vk_codes(action.keys)
+        except (KeyError, TypeError, ValueError, win32_keys.UnknownKeyTokenError):
+            # A hand-edited or partially corrupted bindings file must disable
+            # only the affected button, never escape the Raw Input callback
+            # and tear down ordinary-button processing for the whole device.
+            self._logger.warning("invalid button binding ignored: %s", button_id)
+            return
         self._apply_button_action(action)
 
     def _apply_button_action(self, action: key_mapping.ButtonAction) -> None:
         try:
+            if action.kind == key_mapping.ActionKind.DISABLED:
+                return
             if action.kind == key_mapping.ActionKind.KEY_COMBO:
                 win32_input.send_key_combo_tap(action.keys)
             elif action.kind == key_mapping.ActionKind.SYSTEM_VOLUME_UP:

@@ -40,6 +40,10 @@ class DefaultButtonActionsTests(unittest.TestCase):
 
 
 class ButtonActionSerializationTests(unittest.TestCase):
+    def test_round_trip_disabled_action(self):
+        action = key_mapping.ButtonAction(key_mapping.ActionKind.DISABLED)
+        self.assertEqual(key_mapping.ButtonAction.from_dict(action.to_dict()), action)
+
     def test_round_trip_key_combo(self):
         action = key_mapping.ButtonAction(key_mapping.ActionKind.KEY_COMBO, ("win", "d"))
         restored = key_mapping.ButtonAction.from_dict(action.to_dict())

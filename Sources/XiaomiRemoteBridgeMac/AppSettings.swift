@@ -81,6 +81,7 @@ final class AppSettings: ObservableObject {
         static let customMappingEnabled = "customMappingEnabled"
         static let legacyExclusiveHID = "exclusiveHID"
         static let buttonBindings = "buttonBindings"
+        static let buttonBindingsV2 = "buttonBindingsV2"
         static let peripheralIdentifier = "peripheralIdentifier"
         static let localFnMicEnabled = "localFnMicEnabled"
         static let localMicInputUID = "localMicInputUID"
@@ -136,7 +137,7 @@ final class AppSettings: ObservableObject {
         didSet { defaults.set(launchAtLoginEnabled, forKey: Keys.launchAtLoginEnabled) }
     }
 
-    @Published var buttonBindings: [RemoteButton: ButtonAction] {
+    @Published var buttonBindings: [RemoteButton: ButtonBinding] {
         didSet { saveBindings() }
     }
 
@@ -175,13 +176,18 @@ final class AppSettings: ObservableObject {
         launchAtLoginEnabled = defaults.object(forKey: Keys.launchAtLoginEnabled) == nil
             ? true
             : defaults.bool(forKey: Keys.launchAtLoginEnabled)
-        if
-            let data = defaults.data(forKey: Keys.buttonBindings),
-            let decoded = try? JSONDecoder().decode([String: ButtonAction].self, from: data)
-        {
+        if let data = defaults.data(forKey: Keys.buttonBindingsV2),
+           let decoded = try? JSONDecoder().decode([String: ButtonBinding].self, from: data) {
             buttonBindings = Self.defaultBindings.merging(
                 Dictionary(uniqueKeysWithValues: decoded.compactMap { key, value in
                     RemoteButton(rawValue: key).map { ($0, value) }
+                })
+            ) { _, saved in saved }
+        } else if let data = defaults.data(forKey: Keys.buttonBindings),
+                  let decoded = try? JSONDecoder().decode([String: ButtonAction].self, from: data) {
+            buttonBindings = Self.defaultBindings.merging(
+                Dictionary(uniqueKeysWithValues: decoded.compactMap { key, value in
+                    RemoteButton(rawValue: key).map { ($0, .preset(value)) }
                 })
             ) { _, saved in saved }
         } else {
@@ -189,12 +195,21 @@ final class AppSettings: ObservableObject {
         }
     }
 
+    func binding(for button: RemoteButton) -> ButtonBinding {
+        buttonBindings[button] ?? .preset(.disabled)
+    }
+
     func action(for button: RemoteButton) -> ButtonAction {
-        buttonBindings[button] ?? .disabled
+        guard case let .preset(action) = binding(for: button) else { return .disabled }
+        return action
+    }
+
+    func setBinding(_ binding: ButtonBinding, for button: RemoteButton) {
+        buttonBindings[button] = binding
     }
 
     func setAction(_ action: ButtonAction, for button: RemoteButton) {
-        buttonBindings[button] = action
+        setBinding(.preset(action), for: button)
     }
 
     func resetBindings() {
@@ -204,22 +219,23 @@ final class AppSettings: ObservableObject {
     private func saveBindings() {
         let raw = Dictionary(uniqueKeysWithValues: buttonBindings.map { ($0.key.rawValue, $0.value) })
         if let data = try? JSONEncoder().encode(raw) {
-            defaults.set(data, forKey: Keys.buttonBindings)
+            defaults.set(data, forKey: Keys.buttonBindingsV2)
         }
     }
 
-    static let defaultBindings: [RemoteButton: ButtonAction] = [
-        .power: .escape,
-        .up: .arrowUp,
-        .left: .arrowLeft,
-        .ok: .returnKey,
-        .right: .arrowRight,
-        .down: .arrowDown,
-        .back: .deleteBackward,
-        .volumeUp: .volumeUp,
-        .home: .showDesktop,
-        .volumeDown: .volumeDown,
-        .menu: .contextMenu,
-        .tv: .appSwitcher,
+    static let defaultBindings: [RemoteButton: ButtonBinding] = [
+        .microphone: .hardwareFn,
+        .power: .preset(.escape),
+        .up: .preset(.arrowUp),
+        .left: .preset(.arrowLeft),
+        .ok: .preset(.returnKey),
+        .right: .preset(.arrowRight),
+        .down: .preset(.arrowDown),
+        .back: .preset(.deleteBackward),
+        .volumeUp: .preset(.volumeUp),
+        .home: .preset(.showDesktop),
+        .volumeDown: .preset(.volumeDown),
+        .menu: .preset(.contextMenu),
+        .tv: .preset(.appSwitcher),
     ]
 }

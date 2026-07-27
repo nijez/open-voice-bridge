@@ -1,6 +1,7 @@
 import Foundation
 
 enum RemoteButton: String, CaseIterable, Codable, Identifiable {
+    case microphone
     case power
     case up
     case left
@@ -18,6 +19,7 @@ enum RemoteButton: String, CaseIterable, Codable, Identifiable {
 
     var hidUsage: UInt16 {
         switch self {
+        case .microphone: return 0x3E
         case .power: return 0x66
         case .up: return 0x52
         case .left: return 0x50
@@ -35,6 +37,7 @@ enum RemoteButton: String, CaseIterable, Codable, Identifiable {
 
     var shortLabel: String {
         switch self {
+        case .microphone: return "语音"
         case .power: return "电源"
         case .up: return "上"
         case .left: return "左"
@@ -52,6 +55,7 @@ enum RemoteButton: String, CaseIterable, Codable, Identifiable {
 
     var displayName: String {
         switch self {
+        case .microphone: return "语音键"
         case .power: return "电源键"
         case .up: return "上键"
         case .left: return "左键"
@@ -73,6 +77,7 @@ enum RemoteButton: String, CaseIterable, Codable, Identifiable {
 
     var nativeEvent: RemoteNativeEvent? {
         switch self {
+        case .microphone: return .keyboard(keyCode: 96)
         case .ok: return .keyboard(keyCode: 36)
         case .tv: return .keyboard(keyCode: 50)
         case .home: return .keyboard(keyCode: 115)
@@ -138,6 +143,107 @@ enum ButtonAction: String, CaseIterable, Codable, Identifiable {
         case .volumeMute: return "系统静音"
         case .playPause: return "播放 / 暂停"
         }
+    }
+}
+
+struct KeyChord: Codable, Equatable, Hashable {
+    struct Modifiers: OptionSet, Codable, Hashable {
+        let rawValue: UInt8
+
+        static let command = Self(rawValue: 1 << 0)
+        static let control = Self(rawValue: 1 << 1)
+        static let option = Self(rawValue: 1 << 2)
+        static let shift = Self(rawValue: 1 << 3)
+    }
+
+    let keyCode: UInt16
+    let keyLabel: String
+    let modifiers: Modifiers
+
+    var isValid: Bool {
+        keyCode <= 127 && !keyLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && keyLabel.count <= 24
+    }
+
+    var displayName: String {
+        var parts: [String] = []
+        if modifiers.contains(.control) { parts.append("⌃") }
+        if modifiers.contains(.option) { parts.append("⌥") }
+        if modifiers.contains(.shift) { parts.append("⇧") }
+        if modifiers.contains(.command) { parts.append("⌘") }
+        parts.append(keyLabel)
+        return parts.joined()
+    }
+}
+
+enum ButtonBinding: Codable, Equatable {
+    case preset(ButtonAction)
+    case shortcut(KeyChord)
+    case hardwareFn
+
+    private enum CodingKeys: String, CodingKey { case type, action, chord }
+    private enum Kind: String, Codable { case preset, shortcut, hardwareFn }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        switch try container.decode(Kind.self, forKey: .type) {
+        case .preset:
+            self = .preset(try container.decode(ButtonAction.self, forKey: .action))
+        case .shortcut:
+            self = .shortcut(try container.decode(KeyChord.self, forKey: .chord))
+        case .hardwareFn:
+            self = .hardwareFn
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case let .preset(action):
+            try container.encode(Kind.preset, forKey: .type)
+            try container.encode(action, forKey: .action)
+        case let .shortcut(chord):
+            try container.encode(Kind.shortcut, forKey: .type)
+            try container.encode(chord, forKey: .chord)
+        case .hardwareFn:
+            try container.encode(Kind.hardwareFn, forKey: .type)
+        }
+    }
+
+    var displayName: String {
+        switch self {
+        case let .preset(action): return action.displayName
+        case let .shortcut(chord): return chord.displayName
+        case .hardwareFn: return "硬件 Fn（默认语音）"
+        }
+    }
+
+    var isDisabled: Bool {
+        if case .preset(.disabled) = self { return true }
+        return false
+    }
+}
+
+struct HeldKeyChordLatch {
+    private(set) var chord: KeyChord?
+
+    var isHeld: Bool { chord != nil }
+
+    mutating func press(_ chord: KeyChord) {
+        self.chord = chord
+    }
+
+    @discardableResult
+    mutating func release(using deliver: (KeyChord) -> Bool) -> Bool {
+        guard let chord else { return true }
+        guard deliver(chord) else { return false }
+        self.chord = nil
+        return true
+    }
+}
+
+enum VoiceBindingChangeGate {
+    static func canChange(isStreaming: Bool, physicalKeyDown: Bool) -> Bool {
+        !isStreaming && !physicalKeyDown
     }
 }
 

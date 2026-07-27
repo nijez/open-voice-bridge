@@ -25,6 +25,11 @@ from ovb_rc003.settings_ui import (
 
 
 class DisplayRoundTripTests(unittest.TestCase):
+    def test_disabled_action_round_trips(self):
+        action = key_mapping.ButtonAction(key_mapping.ActionKind.DISABLED)
+        self.assertEqual(_action_to_display(action), "禁用")
+        self.assertEqual(_display_to_action("禁用").kind, key_mapping.ActionKind.DISABLED)
+
     def test_key_combo_round_trips(self):
         action = key_mapping.ButtonAction(key_mapping.ActionKind.KEY_COMBO, ("win", "d"))
         display = _action_to_display(action)
@@ -59,6 +64,10 @@ class DisplayRoundTripTests(unittest.TestCase):
         restored = _display_to_action(display)
         self.assertEqual(restored.kind, key_mapping.ActionKind.VOICE)
         self.assertEqual(restored.keys, ())
+
+    def test_unknown_key_is_rejected_before_it_can_break_runtime_input(self):
+        with self.assertRaises(hotkey.HotkeyParseError):
+            _display_to_action("ctrl+not_a_real_key")
 
 
 class EndpointDisplayTests(unittest.TestCase):

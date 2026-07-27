@@ -330,6 +330,7 @@ check(
 )
 check(
     RemoteButton.usageMap == [
+        0x3E: .microphone,
         0x28: .ok,
         0x35: .tv,
         0x4A: .home,
@@ -921,10 +922,92 @@ check(
     "context-menu and app-switcher keep their raw values while display names are clarified"
 )
 check(
-    AppSettings.defaultBindings[.menu] == .contextMenu &&
-        AppSettings.defaultBindings[.tv] == .appSwitcher,
+    AppSettings.defaultBindings[.menu] == .preset(.contextMenu) &&
+        AppSettings.defaultBindings[.tv] == .preset(.appSwitcher) &&
+        AppSettings.defaultBindings[.microphone] == .hardwareFn,
     "menu default stays contextMenu (Shift-F10); TV stays appSwitcher (Command-Tab)"
 )
+
+let customChord = KeyChord(
+    keyCode: 35,
+    keyLabel: "P",
+    modifiers: [.command, .shift]
+)
+check(
+    customChord.isValid && customChord.displayName == "⇧⌘P" &&
+        !KeyChord(keyCode: 500, keyLabel: "Bad", modifiers: []).isValid,
+    "custom key chord validation and normalized display"
+)
+
+var heldChord = HeldKeyChordLatch()
+heldChord.press(customChord)
+let failedHeldRelease = heldChord.release { _ in false }
+let successfulHeldRelease = heldChord.release { _ in true }
+check(
+    !failedHeldRelease && successfulHeldRelease && !heldChord.isHeld,
+    "held custom chord retains rollback state until key-up delivery succeeds"
+)
+check(
+    VoiceBindingChangeGate.canChange(isStreaming: false, physicalKeyDown: false) &&
+        !VoiceBindingChangeGate.canChange(isStreaming: true, physicalKeyDown: false) &&
+        !VoiceBindingChangeGate.canChange(isStreaming: false, physicalKeyDown: true),
+    "voice binding cannot change while streaming or physically held"
+)
+check(
+    VoiceMappingRestoreLedger.remainingSavedIDs(
+        saved: [1, 2, 3],
+        present: [1, 2],
+        restored: [1]
+    ) == [2],
+    "failed present F5 restore retains its rollback snapshot for retry"
+)
+
+let unknownExistingF5 = HIDUsageMapping(
+    source: RemoteVoiceFunctionMappingPolicy.remoteVoiceKey.source,
+    destination: 0x0000_0007_0000_00E1
+)
+check(
+    CustomVoiceMappingCleanupPolicy.plan(
+        current: [RemoteVoiceFunctionMappingPolicy.remoteVoiceKey],
+        savedOriginal: .unknown
+    ) == .write([]),
+    "custom voice cleanup removes a known stale F5→Fn after relaunch"
+)
+check(
+    CustomVoiceMappingCleanupPolicy.plan(
+        current: [unknownExistingF5],
+        savedOriginal: .unknown
+    ) == .rejectUnknown,
+    "custom voice cleanup rejects an unknown F5 owner"
+)
+var customCleanupWriteAttempted = false
+check(
+    !CustomVoiceMappingCleanupCoordinator.execute(plans: [.write([])]) { _, _ in
+        customCleanupWriteAttempted = true
+        return false
+    } && customCleanupWriteAttempted,
+    "custom voice cleanup fails closed when write/read-back verification fails"
+)
+
+do {
+    let suiteName = "XiaomiRemoteBridgeMacSelfTest.v2.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suiteName)!
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    let saved: [String: ButtonBinding] = [
+        RemoteButton.menu.rawValue: .shortcut(customChord),
+        RemoteButton.microphone.rawValue: .shortcut(customChord),
+    ]
+    defaults.set(try JSONEncoder().encode(saved), forKey: "buttonBindingsV2")
+    let settings = AppSettings(defaults: defaults)
+    check(
+        settings.binding(for: .menu) == .shortcut(customChord) &&
+            settings.binding(for: .microphone) == .shortcut(customChord) &&
+            settings.binding(for: .back) == .preset(.deleteBackward),
+        "v2 custom bindings persist and merge with defaults"
+    )
+} catch {
+    check(false, "v2 custom bindings persist and merge with defaults: \(error)")
+}
 
 // Legacy JSON with the unchanged contextMenu/appSwitcher raw values still decodes.
 if let legacyDecoded = try? JSONDecoder().decode(

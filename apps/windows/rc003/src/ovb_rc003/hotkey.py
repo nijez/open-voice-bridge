@@ -43,7 +43,7 @@ class HotkeySpec:
         tokens = [token.strip().lower() for token in text.split("+") if token.strip()]
         if not tokens:
             raise HotkeyParseError(f"could not parse hotkey: {text!r}")
-        modifiers = tuple(token for token in tokens if token in _VALID_MODIFIERS)
+        modifiers = tuple(modifier for modifier in _MODIFIER_ORDER if modifier in tokens)
         keys = [token for token in tokens if token not in _VALID_MODIFIERS]
         if len(keys) != 1:
             raise HotkeyParseError(
