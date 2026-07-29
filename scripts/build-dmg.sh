@@ -10,6 +10,7 @@ VERSION="$(plutil -extract CFBundleShortVersionString raw -o - "$PLIST")"
 BUILD="$(plutil -extract CFBundleVersion raw -o - "$PLIST")"
 SOURCE_ROOT="open-voice-bridge-$VERSION-source"
 SOURCE_ARCHIVE="$DISPLAY_NAME-$VERSION-对应源码.zip"
+EXPECTED_RELEASE_TEAM_ID="T486HD59BP"
 RELEASE_SIGN=0
 
 for arg in "$@"; do
@@ -100,6 +101,10 @@ if [[ "$RELEASE_SIGN" -eq 1 ]]; then
   fi
   if ! rg -q '^Timestamp=' <<<"$DMG_SIGNATURE_DETAILS"; then
     print -u2 "release DMG signature is missing a secure timestamp"
+    exit 1
+  fi
+  if [[ "$(print -r -- "$DMG_SIGNATURE_DETAILS" | sed -n 's/^TeamIdentifier=//p' | head -n 1)" != "$EXPECTED_RELEASE_TEAM_ID" ]]; then
+    print -u2 "release DMG TeamIdentifier is not the reviewed project team"
     exit 1
   fi
 fi

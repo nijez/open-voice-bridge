@@ -5,7 +5,7 @@
 --------
 
 这是 Universal 应用，支持 Apple Silicon 和 Intel，最低部署目标为 macOS 11 Big Sur。
-v0.3.7 起的正式 DMG 使用 Apple Developer ID Application 签名并经过 Apple 公证；旧版测试包可能仍为 ad-hoc/未公证。请优先从项目官方 GitHub Releases 下载。
+v0.3.7 起的正式 DMG 使用 Apple Developer ID Application 签名并经过 Apple 公证；v0.3.9 起同时强制校验 Mac Fn 本机麦克风所需的音频输入能力。旧版测试包可能仍为 ad-hoc/未公证。请优先从项目官方 GitHub Releases 下载。
 macOS 11 部署目标已经双架构编译校验，但尚未在真实 macOS 11 机器上运行验收。
 
 首次安装
@@ -16,6 +16,14 @@ macOS 11 部署目标已经双架构编译校验，但尚未在真实 macOS 11 �
 3. 如果系统仍然阻止打开，先确认下载来源和 Release 校验和；历史未公证包才需要在“隐私与安全性”中手动允许。
 4. 按提示允许蓝牙。启用自定义按键映射时，还需要允许“输入监控”和“辅助功能”，然后完全退出并重新打开应用。
 5. 新安装默认开启 Mac 物理 Fn 本机麦克风兼容；需要时在“权限”页允许麦克风。应用只在按住物理 Fn 时采集，松手即停，可在“连接”页随时关闭。
+
+从历史测试包升级后，如果系统权限开关看似开启但应用仍显示未授权，请先完全退出应用，再在“终端”运行以下三条命令，只重置本应用的旧签名授权记录：
+
+    tccutil reset ListenEvent com.kingwell.XiaomiRemoteBridgeMac
+    tccutil reset Accessibility com.kingwell.XiaomiRemoteBridgeMac
+    tccutil reset Microphone com.kingwell.XiaomiRemoteBridgeMac
+
+重新打开应用后，在“权限”页按提示逐项授权。无需重置其他应用的权限。
 
 重新打开设置
 --------------

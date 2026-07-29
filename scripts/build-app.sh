@@ -7,6 +7,8 @@ APP_NAME="XiaomiRemoteBridgeMac"
 DISPLAY_NAME="小米遥控器桥接"
 OUTPUT_DIR="$ROOT/dist"
 APP_DIR="$OUTPUT_DIR/$DISPLAY_NAME.app"
+ENTITLEMENTS="$ROOT/Resources/XiaomiRemoteBridgeMac.entitlements"
+EXPECTED_RELEASE_TEAM_ID="T486HD59BP"
 LOCAL_SIGNING_IDENTITY="${OVB_CODESIGN_IDENTITY:-Open Voice Bridge Local Code Signing}"
 
 UNIVERSAL=0
@@ -20,6 +22,7 @@ for arg in "$@"; do
 done
 
 cd "$ROOT"
+test -f "$ENTITLEMENTS"
 
 AVAILABLE_SIGNING_IDENTITIES="$(security find-identity -v -p codesigning 2>/dev/null)"
 if [[ "$RELEASE_SIGN" -eq 1 ]]; then
@@ -90,18 +93,32 @@ if [[ "$RELEASE_SIGN" -eq 1 ]]; then
   codesign \
     --force \
     --deep \
+    --entitlements "$ENTITLEMENTS" \
     --options runtime \
     --timestamp \
     --sign "$LOCAL_SIGNING_IDENTITY" \
     "$APP_DIR"
 elif rg -Fq "\"$LOCAL_SIGNING_IDENTITY\"" <<<"$AVAILABLE_SIGNING_IDENTITIES"; then
   print "codesign identity: $LOCAL_SIGNING_IDENTITY"
-  codesign --force --deep --sign "$LOCAL_SIGNING_IDENTITY" "$APP_DIR"
+  codesign \
+    --force \
+    --deep \
+    --entitlements "$ENTITLEMENTS" \
+    --sign "$LOCAL_SIGNING_IDENTITY" \
+    "$APP_DIR"
 else
   print "codesign identity: ad-hoc fallback"
-  codesign --force --deep --sign - "$APP_DIR"
+  codesign --force --deep --entitlements "$ENTITLEMENTS" --sign - "$APP_DIR"
 fi
 codesign --verify --deep --strict "$APP_DIR"
+
+EXPECTED_ENTITLEMENTS="$(plutil -convert xml1 -o - "$ENTITLEMENTS")"
+SIGNED_ENTITLEMENTS="$(codesign -d --entitlements :- "$APP_DIR" 2>/dev/null)"
+NORMALIZED_SIGNED_ENTITLEMENTS="$(plutil -convert xml1 -o - - <<<"$SIGNED_ENTITLEMENTS")"
+if [[ "$NORMALIZED_SIGNED_ENTITLEMENTS" != "$EXPECTED_ENTITLEMENTS" ]]; then
+  print -u2 "app signature entitlements differ from the reviewed entitlement allowlist"
+  exit 1
+fi
 
 if [[ "$RELEASE_SIGN" -eq 1 ]]; then
   SIGNATURE_DETAILS="$(codesign -dv --verbose=4 "$APP_DIR" 2>&1)"
@@ -115,6 +132,15 @@ if [[ "$RELEASE_SIGN" -eq 1 ]]; then
   fi
   if ! rg -q '^Timestamp=' <<<"$SIGNATURE_DETAILS"; then
     print -u2 "release signature is missing a secure timestamp"
+    exit 1
+  fi
+  if [[ "$(print -r -- "$SIGNATURE_DETAILS" | sed -n 's/^TeamIdentifier=//p' | head -n 1)" != "$EXPECTED_RELEASE_TEAM_ID" ]]; then
+    print -u2 "release signature TeamIdentifier is not the reviewed project team"
+    exit 1
+  fi
+  DESIGNATED_REQUIREMENT="$(codesign -dr - "$APP_DIR" 2>&1)"
+  if ! rg -Fq "certificate leaf[subject.OU] = $EXPECTED_RELEASE_TEAM_ID" <<<"$DESIGNATED_REQUIREMENT"; then
+    print -u2 "release signature designated requirement is not pinned to the reviewed project team"
     exit 1
   fi
 fi

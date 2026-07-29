@@ -36,7 +36,7 @@ Profile 只记录可核对的事实与状态，不是驱动。只有代码、自
 
 ## 第一个适配器：Xiaomi RC003 for macOS
 
-现有 `XiaomiRemoteBridgeMac` target、应用显示名和 Bundle ID 暂时保留，避免总项目改名导致已安装用户重新授予蓝牙、输入监控和辅助功能权限。当前开发候选为 v0.3.8，包含 Mac 物理 Fn 麦克风兼容、真正鼠标右键、语音键双击暂停/恢复、所有实体键的自定义快捷键录制，以及 Developer ID 正式签名与 Apple 公证发行链。
+现有 `XiaomiRemoteBridgeMac` target、应用显示名和 Bundle ID 暂时保留，避免总项目改名导致已安装用户重新授予蓝牙、输入监控和辅助功能权限。当前版本为 v0.3.9，包含 Mac 物理 Fn 麦克风兼容、真正鼠标右键、语音键双击暂停/恢复、所有实体键的自定义快捷键录制，以及 Developer ID 正式签名与 Apple 公证发行链。v0.3.9 同时补齐 Hardened Runtime 的音频输入 entitlement，并在打包验证中强制检查，修复正式签名包中系统麦克风开关已开启但应用仍显示拒绝的问题。
 
 当前功能：
 
@@ -148,7 +148,7 @@ v0.3.7 起的 macOS 正式包使用 Apple Developer ID Application 同时签署 
 
 在两个列表中都打开“小米遥控器桥接”。如果列表里没有应用，先回到应用的“权限”页面重新点击“请求权限”，或使用列表下方的 `+` 手动加入 `/Applications/小米遥控器桥接.app`。完成后从菜单栏选择“退出”，再从“应用程序”重新打开一次。
 
-> **首次从 ad-hoc/本机测试包升级到 Developer ID 正式包时，权限开关可能看似开启但新版本仍显示无权限。** 这是 macOS 仍保留旧签名身份的 TCC 记录造成的。先在“输入监控”和“辅助功能”中分别关闭再打开“小米遥控器桥接”，然后完全退出并重开；仍无效时，删除旧条目，再用 `+` 重新加入 `/Applications/小米遥控器桥接.app`。从正式包开始，后续版本保持同一 Developer ID 身份，不再因 ad-hoc 哈希变化而每次换身份。
+> **首次从 ad-hoc/本机测试包升级到 Developer ID 正式包时，权限开关可能看似开启但新版本仍显示无权限。** 这是 macOS 仍保留旧签名身份的 TCC 记录造成的。若关闭、删除再重新添加仍无效，请完全退出应用，在“终端”依次运行 `tccutil reset ListenEvent com.kingwell.XiaomiRemoteBridgeMac`、`tccutil reset Accessibility com.kingwell.XiaomiRemoteBridgeMac` 和 `tccutil reset Microphone com.kingwell.XiaomiRemoteBridgeMac`，再重新打开应用并按“权限”页提示逐项授权。这些命令只清除本应用对应权限，不会修改其他应用。v0.3.9 已修复正式签名包漏签音频输入能力的问题；从正式包开始，后续版本保持同一 Developer ID 身份，不再因 ad-hoc 哈希变化而每次换身份。
 
 #### 5. 配置 BlackHole 语音链路
 
@@ -202,7 +202,7 @@ RC003 的语音是通过 ATVV 把**遥控器**麦克风写入 BlackHole 的；�
 
 - **应用打不开**：使用 Control 单击“打开”；仍被拦截时，到对应系统版本的“安全性”页面选择“仍要打开”。
 - **权限列表里没有应用**：先在应用“权限”页面点击“请求权限”；仍未出现时，用权限列表下方的 `+` 加入 `/Applications/小米遥控器桥接.app`，然后完全退出并重新打开。
-- **权限开关已经打开，应用仍提示未授权**：常见于替换 ad-hoc 测试包后签名哈希变化。分别把“输入监控”和“辅助功能”关闭再打开并重启应用；仍无效时，从两个列表删除旧条目，再通过 `+` 重新加入 `/Applications/小米遥控器桥接.app`。
+- **权限开关已经打开，应用仍提示未授权**：先确认已覆盖安装 v0.3.9 或更高版本并完全退出应用。然后在“终端”仅重置本应用的三项旧签名记录：`tccutil reset ListenEvent com.kingwell.XiaomiRemoteBridgeMac`、`tccutil reset Accessibility com.kingwell.XiaomiRemoteBridgeMac`、`tccutil reset Microphone com.kingwell.XiaomiRemoteBridgeMac`。重新打开后到应用“权限”页逐项点击请求；麦克风重置后会暂时从系统列表消失，应用重新发起请求并获准后才会再次出现。
 - **遥控器按键有效但语音没有声音**：确认应用“语音输出”和目标输入法“麦克风”都选择了同一个 `BlackHole 2ch`，不要只选择 MacBook 自带麦克风。
 - **诊断里的 PCM 与输出电平均跳动，但仍没有文字**：这说明遥控器音频已到本应用，且应用已向所选设备提交；“播放节点已完成到输出节点”也只说明本应用播放器完成。虚拟声卡的录音端是否被豆包、微信等第三方输入法选中、读取和提交文字，macOS 没有提供回执，界面会明确显示“状态未知”。
 - **豆包只显示绿色文字预览、只能复制**：先确认输入法已经取得当前可编辑输入框——松开按键、重新单击输入框确认光标已出现后再试。

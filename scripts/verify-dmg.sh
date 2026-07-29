@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="${0:A:h:h}"
 OUTPUT_DIR="$ROOT/dist"
 DISPLAY_NAME="小米遥控器桥接"
+EXPECTED_RELEASE_TEAM_ID="T486HD59BP"
 VERSION="$(plutil -extract CFBundleShortVersionString raw -o - "$ROOT/Resources/Info.plist")"
 BUILD="$(plutil -extract CFBundleVersion raw -o - "$ROOT/Resources/Info.plist")"
 REQUIRE_DEVELOPER_ID=0
@@ -77,6 +78,10 @@ if [[ "$REQUIRE_DEVELOPER_ID" -eq 1 ]]; then
     print -u2 "DMG signature is missing a secure timestamp"
     exit 1
   fi
+  if [[ "$(print -r -- "$DMG_SIGNATURE_DETAILS" | sed -n 's/^TeamIdentifier=//p' | head -n 1)" != "$EXPECTED_RELEASE_TEAM_ID" ]]; then
+    print -u2 "DMG TeamIdentifier is not the reviewed project team"
+    exit 1
+  fi
 fi
 
 hdiutil attach -readonly -nobrowse -mountpoint "$MOUNT_POINT" "$DMG" -quiet
@@ -112,6 +117,12 @@ if [[ "$REQUIRE_NOTARIZED" -eq 1 ]]; then
     print -u2 -- "$GATEKEEPER_RESULT"
     exit 1
   fi
+  APP_GATEKEEPER_RESULT="$(spctl -a -vvv -t execute "$APP" 2>&1)"
+  if ! rg -q '^source=Notarized Developer ID$' <<<"$APP_GATEKEEPER_RESULT"; then
+    print -u2 "app inside the DMG did not pass Gatekeeper as a Notarized Developer ID artifact"
+    print -u2 -- "$APP_GATEKEEPER_RESULT"
+    exit 1
+  fi
 fi
 
 test "$(sips -g pixelWidth "$APP/Contents/Resources/RC003-remote-photo.png" | tail -n 1 | tr -cd '0-9')" = "508"
@@ -123,6 +134,7 @@ for required in \
   "$SOURCE_ROOT/Sources/XiaomiRemoteBridgeMac/SettingsView.swift" \
   "$SOURCE_ROOT/Tests/SelfTest/main.swift" \
   "$SOURCE_ROOT/scripts/build-dmg.sh" \
+  "$SOURCE_ROOT/Resources/XiaomiRemoteBridgeMac.entitlements" \
   "$SOURCE_ROOT/Resources/RC003-remote-photo.png" \
   "$SOURCE_ROOT/device-profiles/xiaomi-rc003.json" \
   "$SOURCE_ROOT/device-profiles/dji-mic-2.json" \
