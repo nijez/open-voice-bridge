@@ -3,11 +3,20 @@ set -euo pipefail
 
 ROOT="${0:A:h:h}"
 UNIVERSAL=0
+REQUIRE_DEVELOPER_ID=0
 APP=""
 for arg in "$@"; do
   case "$arg" in
     --universal) UNIVERSAL=1 ;;
-    *) APP="$arg" ;;
+    --require-developer-id) REQUIRE_DEVELOPER_ID=1 ;;
+    --*) print -u2 "unknown argument: $arg"; exit 1 ;;
+    *)
+      if [[ -n "$APP" ]]; then
+        print -u2 "only one app path may be supplied"
+        exit 1
+      fi
+      APP="$arg"
+      ;;
   esac
 done
 APP="${APP:-$ROOT/dist/小米遥控器桥接.app}"
@@ -47,6 +56,21 @@ test -n "$(plutil -extract NSBluetoothAlwaysUsageDescription raw -o - "$PLIST")"
 test -n "$(plutil -extract NSMicrophoneUsageDescription raw -o - "$PLIST")"
 
 codesign --verify --deep --strict "$APP"
+if [[ "$REQUIRE_DEVELOPER_ID" -eq 1 ]]; then
+  SIGNATURE_DETAILS="$(codesign -dv --verbose=4 "$APP" 2>&1)"
+  if ! rg -q '^Authority=Developer ID Application:' <<<"$SIGNATURE_DETAILS"; then
+    print -u2 "app is not signed with Developer ID Application"
+    exit 1
+  fi
+  if ! rg -q '^CodeDirectory .*flags=.*\(runtime\)' <<<"$SIGNATURE_DETAILS"; then
+    print -u2 "app signature is missing the hardened runtime flag"
+    exit 1
+  fi
+  if ! rg -q '^Timestamp=' <<<"$SIGNATURE_DETAILS"; then
+    print -u2 "app signature is missing a secure timestamp"
+    exit 1
+  fi
+fi
 file "$BINARY" | rg -q 'Mach-O 64-bit executable'
 
 if [[ "$UNIVERSAL" -eq 1 ]]; then

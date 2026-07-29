@@ -6,7 +6,36 @@ OUTPUT_DIR="$ROOT/dist"
 DISPLAY_NAME="小米遥控器桥接"
 VERSION="$(plutil -extract CFBundleShortVersionString raw -o - "$ROOT/Resources/Info.plist")"
 BUILD="$(plutil -extract CFBundleVersion raw -o - "$ROOT/Resources/Info.plist")"
-DMG="${1:-$OUTPUT_DIR/$DISPLAY_NAME-$VERSION-测试版.dmg}"
+REQUIRE_DEVELOPER_ID=0
+REQUIRE_NOTARIZED=0
+DMG=""
+
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    --require-developer-id) REQUIRE_DEVELOPER_ID=1 ;;
+    --require-notarized)
+      REQUIRE_NOTARIZED=1
+      REQUIRE_DEVELOPER_ID=1
+      ;;
+    --*) print -u2 "unknown argument: $1"; exit 1 ;;
+    *)
+      if [[ -n "$DMG" ]]; then
+        print -u2 "only one DMG path may be supplied"
+        exit 1
+      fi
+      DMG="$1"
+      ;;
+  esac
+  shift
+done
+
+if [[ -z "$DMG" ]]; then
+  if [[ "$REQUIRE_DEVELOPER_ID" -eq 1 ]]; then
+    DMG="$OUTPUT_DIR/$DISPLAY_NAME-$VERSION.dmg"
+  else
+    DMG="$OUTPUT_DIR/$DISPLAY_NAME-$VERSION-测试版.dmg"
+  fi
+fi
 CHECKSUM="$DMG.sha256"
 SOURCE_ROOT="open-voice-bridge-$VERSION-source"
 SOURCE_ARCHIVE="$DISPLAY_NAME-$VERSION-对应源码.zip"
@@ -36,6 +65,20 @@ test -f "$CHECKSUM"
   shasum -a 256 -c "${CHECKSUM:t}"
 )
 hdiutil verify "$DMG"
+
+if [[ "$REQUIRE_DEVELOPER_ID" -eq 1 ]]; then
+  codesign --verify --strict "$DMG"
+  DMG_SIGNATURE_DETAILS="$(codesign -dv --verbose=4 "$DMG" 2>&1)"
+  if ! rg -q '^Authority=Developer ID Application:' <<<"$DMG_SIGNATURE_DETAILS"; then
+    print -u2 "DMG is not signed with Developer ID Application"
+    exit 1
+  fi
+  if ! rg -q '^Timestamp=' <<<"$DMG_SIGNATURE_DETAILS"; then
+    print -u2 "DMG signature is missing a secure timestamp"
+    exit 1
+  fi
+fi
+
 hdiutil attach -readonly -nobrowse -mountpoint "$MOUNT_POINT" "$DMG" -quiet
 ATTACHED=1
 
@@ -47,7 +90,11 @@ test -L "$MOUNT_POINT/Applications"
 test "$(readlink "$MOUNT_POINT/Applications")" = "/Applications"
 test -f "$GUIDE"
 test -f "$SOURCE_ZIP"
-"$ROOT/scripts/verify-app.sh" --universal "$APP"
+APP_VERIFY_ARGS=(--universal)
+if [[ "$REQUIRE_DEVELOPER_ID" -eq 1 ]]; then
+  APP_VERIFY_ARGS+=(--require-developer-id)
+fi
+"$ROOT/scripts/verify-app.sh" "${APP_VERIFY_ARGS[@]}" "$APP"
 
 test "$(plutil -extract CFBundleShortVersionString raw -o - "$APP/Contents/Info.plist")" = "$VERSION"
 test "$(plutil -extract CFBundleVersion raw -o - "$APP/Contents/Info.plist")" = "$BUILD"
@@ -55,6 +102,16 @@ APP_SIGNATURE_DETAILS="$(codesign -dv --verbose=4 "$APP" 2>&1)"
 if ! rg -q '^Signature=adhoc$|^Authority=' <<<"$APP_SIGNATURE_DETAILS"; then
   print -u2 "app is missing both an ad-hoc signature and a named signing authority"
   exit 1
+fi
+
+if [[ "$REQUIRE_NOTARIZED" -eq 1 ]]; then
+  xcrun stapler validate "$DMG"
+  GATEKEEPER_RESULT="$(spctl -a -vvv -t open --context context:primary-signature "$DMG" 2>&1)"
+  if ! rg -q '^source=Notarized Developer ID$' <<<"$GATEKEEPER_RESULT"; then
+    print -u2 "DMG did not pass Gatekeeper as a Notarized Developer ID artifact"
+    print -u2 -- "$GATEKEEPER_RESULT"
+    exit 1
+  fi
 fi
 
 test "$(sips -g pixelWidth "$APP/Contents/Resources/RC003-remote-photo.png" | tail -n 1 | tr -cd '0-9')" = "508"
@@ -113,4 +170,8 @@ else
   SIGNING_AUTHORITY="$(print -r -- "$SIGNATURE_DETAILS" | sed -n 's/^Authority=//p' | head -n 1)"
   SIGNATURE_LABEL="named (${SIGNING_AUTHORITY:-unknown authority})"
 fi
-print "SIGNATURE: $SIGNATURE_LABEL / notarization is not checked by this script"
+if [[ "$REQUIRE_NOTARIZED" -eq 1 ]]; then
+  print "SIGNATURE: $SIGNATURE_LABEL / stapled notarization ticket validated"
+else
+  print "SIGNATURE: $SIGNATURE_LABEL / notarization not required by this invocation"
+fi

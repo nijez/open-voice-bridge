@@ -7,21 +7,35 @@ APP_NAME="XiaomiRemoteBridgeMac"
 DISPLAY_NAME="小米遥控器桥接"
 OUTPUT_DIR="$ROOT/dist"
 APP_DIR="$OUTPUT_DIR/$DISPLAY_NAME.app"
-# A persistent local identity keeps the designated requirement stable across
-# iterative installs, so macOS TCC does not treat every new binary as a new
-# app. Public/CI builds intentionally fall back to ad-hoc signing when this
-# optional identity is not present.
 LOCAL_SIGNING_IDENTITY="${OVB_CODESIGN_IDENTITY:-Open Voice Bridge Local Code Signing}"
 
 UNIVERSAL=0
+RELEASE_SIGN=0
 for arg in "$@"; do
   case "$arg" in
     --universal) UNIVERSAL=1 ;;
+    --release-sign) RELEASE_SIGN=1 ;;
     *) print -u2 "unknown argument: $arg"; exit 1 ;;
   esac
 done
 
 cd "$ROOT"
+
+AVAILABLE_SIGNING_IDENTITIES="$(security find-identity -v -p codesigning 2>/dev/null)"
+if [[ "$RELEASE_SIGN" -eq 1 ]]; then
+  if [[ -z "${OVB_CODESIGN_IDENTITY:-}" ]]; then
+    print -u2 "OVB_CODESIGN_IDENTITY must name a Developer ID Application identity for --release-sign"
+    exit 1
+  fi
+  if [[ "$LOCAL_SIGNING_IDENTITY" != "Developer ID Application:"* ]]; then
+    print -u2 "--release-sign requires a Developer ID Application identity"
+    exit 1
+  fi
+  if ! rg -Fq "\"$LOCAL_SIGNING_IDENTITY\"" <<<"$AVAILABLE_SIGNING_IDENTITIES"; then
+    print -u2 "Developer ID signing identity is not available in the current keychain"
+    exit 1
+  fi
+fi
 
 if [[ "$UNIVERSAL" -eq 1 ]]; then
   xcrun swift build -c "$CONFIGURATION" --triple arm64-apple-macosx11.0
@@ -71,8 +85,16 @@ ditto --norsrc --noextattr --noqtn --noacl \
 ditto --norsrc --noextattr --noqtn --noacl \
   "$ROOT/device-profiles" \
   "$APP_DIR/Contents/Resources/device-profiles"
-AVAILABLE_SIGNING_IDENTITIES="$(security find-identity -v -p codesigning 2>/dev/null)"
-if rg -Fq "\"$LOCAL_SIGNING_IDENTITY\"" <<<"$AVAILABLE_SIGNING_IDENTITIES"; then
+if [[ "$RELEASE_SIGN" -eq 1 ]]; then
+  print "codesign identity: Developer ID Application (release)"
+  codesign \
+    --force \
+    --deep \
+    --options runtime \
+    --timestamp \
+    --sign "$LOCAL_SIGNING_IDENTITY" \
+    "$APP_DIR"
+elif rg -Fq "\"$LOCAL_SIGNING_IDENTITY\"" <<<"$AVAILABLE_SIGNING_IDENTITIES"; then
   print "codesign identity: $LOCAL_SIGNING_IDENTITY"
   codesign --force --deep --sign "$LOCAL_SIGNING_IDENTITY" "$APP_DIR"
 else
@@ -80,5 +102,21 @@ else
   codesign --force --deep --sign - "$APP_DIR"
 fi
 codesign --verify --deep --strict "$APP_DIR"
+
+if [[ "$RELEASE_SIGN" -eq 1 ]]; then
+  SIGNATURE_DETAILS="$(codesign -dv --verbose=4 "$APP_DIR" 2>&1)"
+  if ! rg -q '^Authority=Developer ID Application:' <<<"$SIGNATURE_DETAILS"; then
+    print -u2 "release signature is not a Developer ID Application signature"
+    exit 1
+  fi
+  if ! rg -q '^CodeDirectory .*flags=.*\(runtime\)' <<<"$SIGNATURE_DETAILS"; then
+    print -u2 "release signature is missing the hardened runtime flag"
+    exit 1
+  fi
+  if ! rg -q '^Timestamp=' <<<"$SIGNATURE_DETAILS"; then
+    print -u2 "release signature is missing a secure timestamp"
+    exit 1
+  fi
+fi
 
 print "$APP_DIR"

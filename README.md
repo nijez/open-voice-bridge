@@ -36,7 +36,7 @@ Profile 只记录可核对的事实与状态，不是驱动。只有代码、自
 
 ## 第一个适配器：Xiaomi RC003 for macOS
 
-现有 `XiaomiRemoteBridgeMac` target、应用显示名和 Bundle ID 暂时保留，避免总项目改名导致已安装用户重新授予蓝牙、输入监控和辅助功能权限。当前公开测试版为 [v0.3.6](https://github.com/nijez/open-voice-bridge/releases/tag/v0.3.6)，包含 Mac 物理 Fn 麦克风兼容、真正鼠标右键、语音键双击暂停/恢复，以及所有实体键的自定义快捷键录制。
+现有 `XiaomiRemoteBridgeMac` target、应用显示名和 Bundle ID 暂时保留，避免总项目改名导致已安装用户重新授予蓝牙、输入监控和辅助功能权限。当前发行候选为 v0.3.7，包含 Mac 物理 Fn 麦克风兼容、真正鼠标右键、语音键双击暂停/恢复、所有实体键的自定义快捷键录制，以及 Developer ID 正式签名与 Apple 公证发行链。
 
 当前功能：
 
@@ -123,14 +123,14 @@ ARN9 普通款使用同一语音/Fn 行为和同一套默认动作，但映射�
 
 #### 2. 下载并安装应用
 
-1. 从 [v0.3.6 测试版 Release](https://github.com/nijez/open-voice-bridge/releases/tag/v0.3.6) 下载 `小米遥控器桥接-0.3.6-测试版.dmg`；
+1. 从项目 [Releases](https://github.com/nijez/open-voice-bridge/releases) 下载最新的 macOS DMG；
 2. 打开 DMG，把“小米遥控器桥接.app”拖到旁边的 `Applications`；
 3. 进入“应用程序”，按住 Control 单击“小米遥控器桥接”，选择“打开”；
 4. 如果系统仍然拦截：
    - macOS 13 或以上：进入“系统设置 → 隐私与安全性”，在安全性提示处选择“仍要打开”；
    - macOS 11/12：进入“系统偏好设置 → 安全性与隐私 → 通用”，选择“仍要打开”。
 
-公开测试包默认使用 ad-hoc 签名，尚无 Apple Developer ID 签名和公证。只应从本项目 Release 或你信任的分享者处取得安装包。维护者在自己的 Mac 上配置名为 `Open Voice Bridge Local Code Signing` 的持久本机签名身份后，构建脚本会优先使用它，以保持本机反复更新时的授权身份稳定；这不是 Developer ID 签名，也不会改变公开包的签名状态。
+v0.3.7 起的 macOS 正式包使用 Apple Developer ID Application 同时签署 App 本体和 DMG 容器，启用 hardened runtime、安全时间戳并装订 Apple 公证 ticket。v0.3.6 及更早公开测试包仍是 ad-hoc/未公证历史产物。只应从本项目 Release 或你信任的分享者处取安装包。维护者的本地开发构建仍可使用 `Open Voice Bridge Local Code Signing` 持久本机身份或 ad-hoc 回退；只有显式 `--release-sign` 构建并通过公证验证的 DMG 才是正式发行包。
 
 #### 3. 让遥控器进入配对状态
 
@@ -148,7 +148,7 @@ ARN9 普通款使用同一语音/Fn 行为和同一套默认动作，但映射�
 
 在两个列表中都打开“小米遥控器桥接”。如果列表里没有应用，先回到应用的“权限”页面重新点击“请求权限”，或使用列表下方的 `+` 手动加入 `/Applications/小米遥控器桥接.app`。完成后从菜单栏选择“退出”，再从“应用程序”重新打开一次。
 
-> **升级默认 ad-hoc 测试包后，权限开关可能看似开启但新版本仍显示无权限。** 这是测试签名哈希变化后 macOS 继续保留旧记录造成的。先在“输入监控”和“辅助功能”中分别关闭再打开“小米遥控器桥接”，然后完全退出并重开应用；仍无效时，删除列表中的旧条目，再用 `+` 重新加入 `/Applications/小米遥控器桥接.app`。维护者的本机若配置了持久签名身份，后续本机更新不会走这条 ad-hoc 降级路径。这两个开关都在 macOS 系统设置里，不是遥控器实体按键。
+> **首次从 ad-hoc/本机测试包升级到 Developer ID 正式包时，权限开关可能看似开启但新版本仍显示无权限。** 这是 macOS 仍保留旧签名身份的 TCC 记录造成的。先在“输入监控”和“辅助功能”中分别关闭再打开“小米遥控器桥接”，然后完全退出并重开；仍无效时，删除旧条目，再用 `+` 重新加入 `/Applications/小米遥控器桥接.app`。从正式包开始，后续版本保持同一 Developer ID 身份，不再因 ad-hoc 哈希变化而每次换身份。
 
 #### 5. 配置 BlackHole 语音链路
 
@@ -224,6 +224,19 @@ RC003 的语音是通过 ATVV 把**遥控器**麦克风写入 BlackHole 的；�
 ./scripts/build-dmg.sh
 ./scripts/verify-dmg.sh
 ```
+
+维护者的正式签名与公证流程：
+
+```bash
+./scripts/store-notary-credentials.sh "OpenVoiceBridge Notary"
+OVB_CODESIGN_IDENTITY='Developer ID Application: <name> (<team-id>)' \
+  ./scripts/build-dmg.sh --release-sign
+./scripts/notarize-dmg.sh \
+  --keychain-profile "OpenVoiceBridge Notary" \
+  "dist/小米遥控器桥接-<version>.dmg"
+```
+
+`store-notary-credentials.sh` 会交互式请求 Apple Account、Team ID 和 App 专用密码；密码只进入 macOS 钥匙串，不应写进脚本、环境变量、命令历史或仓库。
 
 当前 macOS 11 部署目标已完成双架构编译与打包校验，但尚未在真实 macOS 11 机器上运行验收。
 
