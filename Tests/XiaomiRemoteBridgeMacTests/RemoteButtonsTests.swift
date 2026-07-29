@@ -159,6 +159,33 @@ struct RemoteButtonsTests {
         #expect(!reloaded.launchAtLoginEnabled)
     }
 
+    @Test func localFnMicrophoneDefaultsOnAndPersistsOptOut() throws {
+        let suiteName = "XiaomiRemoteBridgeMacTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let initial = AppSettings(defaults: defaults)
+        #expect(initial.localFnMicEnabled)
+        initial.localFnMicEnabled = false
+
+        let reloaded = AppSettings(defaults: defaults)
+        #expect(!reloaded.localFnMicEnabled)
+    }
+
+    @Test func localFnMicrophonePermissionTextTracksFeatureState() {
+        #expect(
+            MicrophoneAuthorization.denied.statusText(featureEnabled: false)
+                == "未启用（无需麦克风权限）"
+        )
+        #expect(
+            MicrophoneAuthorization.denied.statusText(featureEnabled: true)
+                == "已拒绝（请在系统设置中开启）"
+        )
+        #expect(
+            MicrophoneAuthorization.authorized.statusText(featureEnabled: true) == "已授权"
+        )
+    }
+
     @Test func nativeEventDescriptorsCoverPotentialDuplicateEvents() {
         #expect(RemoteButton.up.nativeEvent == .keyboard(keyCode: 126))
         #expect(RemoteButton.ok.nativeEvent == .keyboard(keyCode: 36))

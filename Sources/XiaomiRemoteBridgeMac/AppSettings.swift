@@ -111,8 +111,10 @@ final class AppSettings: ObservableObject {
         didSet { defaults.set(customMappingEnabled, forKey: Keys.customMappingEnabled) }
     }
 
-    /// Off by default: the Mac built-in microphone is never requested or captured
-    /// until the user explicitly turns this on.
+    /// On by default for a new profile, but an explicit opt-out is persisted and
+    /// respected across upgrades. Enabling the preference alone never starts
+    /// capture: the physical Fn edge, TCC grants, audio-loop gate, and RC003
+    /// priority still have to admit a live session.
     @Published var localFnMicEnabled: Bool {
         didSet { defaults.set(localFnMicEnabled, forKey: Keys.localFnMicEnabled) }
     }
@@ -168,7 +170,9 @@ final class AppSettings: ObservableObject {
         } else {
             customMappingEnabled = defaults.bool(forKey: Keys.legacyExclusiveHID)
         }
-        localFnMicEnabled = defaults.bool(forKey: Keys.localFnMicEnabled)
+        localFnMicEnabled = defaults.object(forKey: Keys.localFnMicEnabled) == nil
+            ? true
+            : defaults.bool(forKey: Keys.localFnMicEnabled)
         localMicInputUID = defaults.string(forKey: Keys.localMicInputUID) ?? ""
         doubleClickToggleEnabled = defaults.object(forKey: Keys.doubleClickToggleEnabled) == nil
             ? true

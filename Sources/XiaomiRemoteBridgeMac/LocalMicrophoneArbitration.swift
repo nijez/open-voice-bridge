@@ -715,6 +715,15 @@ enum AudioLoopGuard {
 
 // MARK: - Readiness / liveness gate
 
+/// Keeps the default-on compatibility feature completely idle until a real Fn
+/// capture session exists. Permission and device changes while idle are handled
+/// by explicit lifecycle events, never by a repeating retry loop.
+enum LocalMicLivenessPolicy {
+    static func shouldRun(enabled: Bool, isCapturing: Bool) -> Bool {
+        enabled && isCapturing
+    }
+}
+
 /// Why the local microphone path is blocked, ordered from most to least
 /// fundamental. Used for both start-time readiness and while-capturing liveness,
 /// so the same rules that admit a capture also tear it down the moment any of

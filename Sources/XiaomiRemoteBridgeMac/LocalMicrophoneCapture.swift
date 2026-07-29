@@ -20,6 +20,10 @@ enum MicrophoneAuthorization: Equatable {
         case .restricted: return "受系统策略限制"
         }
     }
+
+    func statusText(featureEnabled: Bool) -> String {
+        featureEnabled ? statusText : "未启用（无需麦克风权限）"
+    }
 }
 
 /// Thin wrapper over `AVCaptureDevice` audio authorisation. The app never asks
