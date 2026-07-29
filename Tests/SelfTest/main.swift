@@ -757,6 +757,14 @@ check(
         XiaomiRemoteVariant.detected(fromModelNumber: "") == nil,
     "unknown or missing Xiaomi model numbers fail closed instead of reusing a persisted variant"
 )
+check(
+    MicrophoneAuthorization.denied.statusText(featureEnabled: false)
+        == "未启用（无需麦克风权限）" &&
+        MicrophoneAuthorization.denied.statusText(featureEnabled: true)
+            == "已拒绝（请在系统设置中开启）" &&
+        MicrophoneAuthorization.authorized.statusText(featureEnabled: true) == "已授权",
+    "Mac Fn microphone permission text distinguishes disabled feature from TCC denial"
+)
 if let defaults = UserDefaults(suiteName: suiteName) {
     let saved = try JSONEncoder().encode([
         RemoteButton.back.rawValue: ButtonAction.disabled,
@@ -770,17 +778,20 @@ if let defaults = UserDefaults(suiteName: suiteName) {
             settings.customMappingEnabled &&
             settings.selectedDeviceProfile == .xiaomiRC003 &&
             settings.xiaomiRemoteVariant == .rc003Pro &&
+            settings.localFnMicEnabled &&
             settings.launchAtLoginEnabled,
         "saved bindings and legacy mapping toggle migrate"
     )
     settings.selectedDeviceProfile = .djiMic2
     settings.xiaomiRemoteVariant = .arn9
+    settings.localFnMicEnabled = false
     settings.launchAtLoginEnabled = false
     let reloaded = AppSettings(defaults: defaults)
     check(
         reloaded.selectedDeviceProfile == .djiMic2 &&
             reloaded.xiaomiRemoteVariant == .arn9 &&
             !reloaded.xiaomiRemoteVariant.mappableButtons.contains(.tv) &&
+            !reloaded.localFnMicEnabled &&
             !reloaded.launchAtLoginEnabled &&
             MacDeviceProfile.allCases == [.xiaomiRC003, .djiMic2],
         "Mac device selector and login-start preference persist"
@@ -1309,6 +1320,16 @@ check(
 )
 
 // MARK: Unified readiness / liveness gate (P3)
+
+let idleLivenessDecisions = (0..<10_000).map { _ in
+    LocalMicLivenessPolicy.shouldRun(enabled: true, isCapturing: false)
+}
+check(
+    idleLivenessDecisions.allSatisfy { !$0 } &&
+        LocalMicLivenessPolicy.shouldRun(enabled: true, isCapturing: true) &&
+        !LocalMicLivenessPolicy.shouldRun(enabled: false, isCapturing: true),
+    "local mic default-on idle state schedules no liveness polling; only active capture does"
+)
 
 check(
     LocalMicGate.block(

@@ -51,6 +51,7 @@ private final class XiaomiRemoteBridgeAppDelegate: NSObject, NSApplicationDelega
     func applicationDidBecomeActive(_ notification: Notification) {
         model.refreshLaunchAtLoginStatus()
         model.refreshHIDPermissionReminder()
+        model.refreshPrivacyPermissionState()
     }
 
     private func installTerminationSignalHandlers() {

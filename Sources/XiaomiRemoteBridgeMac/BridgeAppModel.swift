@@ -242,7 +242,8 @@ final class BridgeAppModel: ObservableObject, XiaomiBluetoothBridgeDelegate {
             self?.settings.gainDB ?? 0
         }
         localMicBridge.onStatus = { [weak self] value in
-            self?.localMicStatus = value
+            guard let self, self.localMicStatus != value else { return }
+            self.localMicStatus = value
         }
         remoteVoiceKeyMonitor.onVoiceKeyEdge = { [weak self] edge in
             self?.handleRemoteVoiceKeyEdge(edge)
@@ -321,6 +322,11 @@ final class BridgeAppModel: ObservableObject, XiaomiBluetoothBridgeDelegate {
         refreshMicrophonePermission()
         localMicBridge.setEnabled(enabled)
         if enabled {
+            // The toggle is an explicit user action. Ask only at that moment;
+            // the default-on preference itself never triggers a launch prompt.
+            if microphonePermission != .authorized {
+                requestMicrophonePermission()
+            }
             // Re-sync the ATVV preempt state in case RC003 is already streaming.
             localMicBridge.noteRemoteVoice(active: isStreaming)
         }
@@ -433,7 +439,15 @@ final class BridgeAppModel: ObservableObject, XiaomiBluetoothBridgeDelegate {
     }
 
     func refreshMicrophonePermission() {
-        microphonePermission = MicrophonePermission.status
+        let current = MicrophonePermission.status
+        if microphonePermission != current { microphonePermission = current }
+    }
+
+    /// Read-only refresh after returning from System Settings. This updates the
+    /// visible TCC state and retries a blocked Fn listener once without prompting.
+    func refreshPrivacyPermissionState() {
+        refreshMicrophonePermission()
+        localMicBridge.refreshAfterSystemSettingsChange()
     }
 
     func requestMicrophonePermission() {

@@ -320,10 +320,15 @@ struct SettingsView: View {
                 }
                 statusRow("兼容状态", value: model.localMicStatus)
                 statusRow("麦克风权限", value: model.microphonePermission.statusText)
+                if model.microphonePermission != .authorized {
+                    Button("请求麦克风权限") {
+                        model.requestMicrophonePermission()
+                    }
+                }
             }
             DisclosureGroup("工作方式与音频优先级", isExpanded: $localFnHelpExpanded) {
                 Text(
-                    "默认关闭。只有开启后、按住 Mac 内置键盘的物理 Fn、且 RC003 未在说话时，" +
+                    "新安装默认开启。只有系统已授权、按住 Mac 内置键盘的物理 Fn、且 RC003 未在说话时，" +
                     "才会把本机麦克风转发到上面所选的语音输出（如 BlackHole）。松开 Fn 立即停止；" +
                     "RC003 语音始终优先。不录音、不上传，不修改系统默认音频。"
                 )
@@ -581,7 +586,7 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 12) {
                 if settings.selectedDeviceProfile == .xiaomiRC003 {
                     settingsCard("RC003 权限状态", systemImage: "lock.shield") {
-                        Text("按键映射需要输入监控和辅助功能；本机 Fn 麦克风只在你主动开启时需要麦克风权限。")
+                        Text("按键映射需要输入监控和辅助功能；Mac Fn 默认开启，但只在按住物理 Fn 时采集并需要麦克风权限。")
                             .font(.footnote)
                             .foregroundColor(.secondary)
 
@@ -616,11 +621,23 @@ struct SettingsView: View {
                         permissionStatusRow(
                             title: "麦克风（Mac Fn）",
                             detail: "仅在开启 Mac Fn 兼容并按住物理 Fn 时采集",
-                            status: model.microphonePermission.statusText,
+                            status: model.microphonePermission.statusText(
+                                featureEnabled: settings.localFnMicEnabled
+                            ),
                             systemImage: "mic",
-                            tint: model.microphonePermission == .authorized ? .green : .secondary,
-                            actionTitle: model.microphonePermission == .authorized ? "查看" : "请求权限"
-                        ) { model.requestMicrophonePermission() }
+                            tint: settings.localFnMicEnabled && model.microphonePermission == .authorized
+                                ? .green
+                                : .secondary,
+                            actionTitle: !settings.localFnMicEnabled
+                                ? "启用"
+                                : (model.microphonePermission == .authorized ? "查看" : "请求权限")
+                        ) {
+                            if settings.localFnMicEnabled {
+                                model.requestMicrophonePermission()
+                            } else {
+                                model.setLocalFnMicEnabled(true)
+                            }
+                        }
                     }
                 } else {
                     settingsCard("DJI Mic 2 权限", systemImage: "mic") {

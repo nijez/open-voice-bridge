@@ -51,7 +51,10 @@ final class LocalMicrophoneBridge {
     private var livenessTimer: DispatchSourceTimer?
 
     private(set) var status = "兼容 Mac 键盘 Fn：已关闭" {
-        didSet { onStatus?(status) }
+        didSet {
+            guard oldValue != status else { return }
+            onStatus?(status)
+        }
     }
 
     init() {
@@ -80,13 +83,16 @@ final class LocalMicrophoneBridge {
     }
 
     func setEnabled(_ on: Bool) {
+        guard on != enabled else {
+            updateReadiness()
+            return
+        }
         enabled = on
         if on {
             if !monitor.isRunning {
                 _ = monitor.start()
             }
             apply(arbiter.handle(.setEnabled(true)), reason: "enabled")
-            startLivenessTimer()
             updateReadiness()
             AppLogger.shared.write("LOCAL MIC ENABLED enabled=true monitor=\(monitor.isRunning)")
         } else {
@@ -119,6 +125,21 @@ final class LocalMicrophoneBridge {
     /// Recompute readiness after output-device, permission, or device-topology
     /// changes. Also refreshes the visible status.
     func refreshReadiness() {
+        updateReadiness()
+    }
+
+    /// Called after returning from System Settings. This is an explicit,
+    /// event-driven retry point for a previously blocked Fn event tap. It never
+    /// requests TCC permission and does not leave an idle retry timer running.
+    func refreshAfterSystemSettingsChange() {
+        guard enabled else {
+            updateReadiness()
+            return
+        }
+        if !monitor.isRunning || !monitor.isTapEnabled {
+            monitor.stop()
+            _ = monitor.start()
+        }
         updateReadiness()
     }
 
@@ -227,6 +248,7 @@ final class LocalMicrophoneBridge {
         let session = router.begin()
         if capture.start(inputDeviceID: deviceID, gainDB: gain, session: session) {
             status = "兼容 Mac 键盘 Fn：本机麦克风采集中（松开 Fn 结束）"
+            startLivenessTimer()
             AppLogger.shared.write("LOCAL MIC CAPTURE start source=\(inputUID.isEmpty ? "default" : "selected")")
         } else {
             router.invalidate()
@@ -245,6 +267,7 @@ final class LocalMicrophoneBridge {
     private func stopActiveCapture(reason: String) {
         pendingStart?.cancel()
         pendingStart = nil
+        stopLivenessTimer()
         // Invalidate the session first so any main-queued sample from the audio
         // thread is dropped before we flush and (maybe) RC003 takes over.
         router.invalidate()
@@ -276,6 +299,13 @@ final class LocalMicrophoneBridge {
     }
 
     private func startLivenessTimer() {
+        guard LocalMicLivenessPolicy.shouldRun(
+            enabled: enabled,
+            isCapturing: capture.isCapturing
+        ) else {
+            stopLivenessTimer()
+            return
+        }
         stopLivenessTimer()
         let timer = DispatchSource.makeTimerSource(queue: .main)
         timer.schedule(deadline: .now() + .seconds(1), repeating: .seconds(1))
@@ -291,32 +321,26 @@ final class LocalMicrophoneBridge {
         livenessTimer = nil
     }
 
-    /// Runs while the feature is enabled. Catches conditions that arrive without
-    /// an explicit event: mic permission revoked, output/input device removed,
-    /// the system default input becoming the output device, the capture engine
-    /// dying, or the Fn tap being silently disabled — all fail closed.
+    /// Runs only while actively capturing. Idle readiness is event-driven, so a
+    /// default-on preference never creates a permanent polling/retry loop.
     private func livenessTick() {
-        guard enabled else {
+        guard LocalMicLivenessPolicy.shouldRun(
+            enabled: enabled,
+            isCapturing: capture.isCapturing
+        ) else {
             stopLivenessTimer()
             return
         }
         if !monitor.isRunning || !monitor.isTapEnabled {
-            handleMonitorDisrupted(recover: true)
+            // Fail closed for this session. A retry happens only after the app
+            // returns from System Settings or the user toggles the feature.
+            handleMonitorDisrupted(recover: false)
             return
         }
-        if capture.isCapturing {
-            if let block = fullBlock(captureEngineHealthy: capture.engineIsHealthy) {
-                stopActiveCapture(reason: "liveness_\(block)")
-                apply(arbiter.handle(.setReady(false)), reason: "liveness")
-                updateReadiness()
-            }
-            return
-        }
-        // Idle: a cheap permission/monitor check only. The full device + loop
-        // re-check runs at the next capture start and on event-driven refreshes.
-        if let block = lightBlock() {
-            apply(arbiter.handle(.setReady(false)), reason: "liveness_idle")
-            status = statusText(for: block)
+        if let block = fullBlock(captureEngineHealthy: capture.engineIsHealthy) {
+            stopActiveCapture(reason: "liveness_\(block)")
+            apply(arbiter.handle(.setReady(false)), reason: "liveness")
+            updateReadiness()
         }
     }
 
@@ -332,14 +356,6 @@ final class LocalMicrophoneBridge {
             resolvedInputUID: resolvedInputUID(),
             captureEngineHealthy: captureEngineHealthy
         )
-    }
-
-    private func lightBlock() -> LocalMicBlock? {
-        guard enabled else { return .disabled }
-        guard MicrophonePermission.status.isAuthorized else { return .micPermission }
-        guard monitor.isRunning, monitor.isTapEnabled else { return .fnMonitor }
-        guard remoteReaderReady else { return .remoteReader }
-        return nil
     }
 
     private func resolvedInputUID() -> String? {

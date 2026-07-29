@@ -14,6 +14,7 @@ xcrun swiftc \
   "$ROOT/Sources/XiaomiRemoteBridgeMac/AppSettings.swift" \
   "$ROOT/Sources/XiaomiRemoteBridgeMac/LaunchAtLoginManager.swift" \
   "$ROOT/Sources/XiaomiRemoteBridgeMac/VoiceFunctionKeyLatch.swift" \
+  "$ROOT/Sources/XiaomiRemoteBridgeMac/LocalMicrophoneCapture.swift" \
   "$ROOT/Sources/XiaomiRemoteBridgeMac/LocalMicrophoneArbitration.swift" \
   "$ROOT/Sources/XiaomiRemoteBridgeMac/ExternalMicrophoneProfile.swift" \
   "$ROOT/Sources/XiaomiRemoteBridgeMac/RemoteVoiceFunctionMapper.swift" \

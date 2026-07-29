@@ -3,6 +3,14 @@ import Testing
 
 @Suite("Local mic arbiter")
 struct LocalMicArbiterTests {
+    @Test func defaultOnIdleDoesNotScheduleLivenessPolling() {
+        for _ in 0..<10_000 {
+            #expect(!LocalMicLivenessPolicy.shouldRun(enabled: true, isCapturing: false))
+        }
+        #expect(LocalMicLivenessPolicy.shouldRun(enabled: true, isCapturing: true))
+        #expect(!LocalMicLivenessPolicy.shouldRun(enabled: false, isCapturing: true))
+    }
+
     private func readyArbiter() -> LocalMicArbiter {
         var arbiter = LocalMicArbiter()
         _ = arbiter.handle(.setEnabled(true))
