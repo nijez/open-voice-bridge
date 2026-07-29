@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT="${0:A:h:h}"
+ENTITLEMENTS="$ROOT/Resources/XiaomiRemoteBridgeMac.entitlements"
+EXPECTED_RELEASE_TEAM_ID="T486HD59BP"
 UNIVERSAL=0
 REQUIRE_DEVELOPER_ID=0
 APP=""
@@ -36,6 +38,7 @@ test -f "$APP/Contents/Resources/OpenVoiceBridge.icns"
 test -f "$APP/Contents/Resources/device-profiles/xiaomi-rc003.json"
 test -f "$APP/Contents/Resources/device-profiles/xiaomi-arn9.json"
 test -f "$APP/Contents/Resources/device-profiles/dji-mic-2.json"
+test -f "$ENTITLEMENTS"
 cmp -s \
   "$ROOT/device-profiles/xiaomi-rc003.json" \
   "$APP/Contents/Resources/device-profiles/xiaomi-rc003.json"
@@ -56,6 +59,13 @@ test -n "$(plutil -extract NSBluetoothAlwaysUsageDescription raw -o - "$PLIST")"
 test -n "$(plutil -extract NSMicrophoneUsageDescription raw -o - "$PLIST")"
 
 codesign --verify --deep --strict "$APP"
+EXPECTED_ENTITLEMENTS="$(plutil -convert xml1 -o - "$ENTITLEMENTS")"
+SIGNED_ENTITLEMENTS="$(codesign -d --entitlements :- "$APP" 2>/dev/null)"
+NORMALIZED_SIGNED_ENTITLEMENTS="$(plutil -convert xml1 -o - - <<<"$SIGNED_ENTITLEMENTS")"
+if [[ "$NORMALIZED_SIGNED_ENTITLEMENTS" != "$EXPECTED_ENTITLEMENTS" ]]; then
+  print -u2 "app signature entitlements differ from the reviewed entitlement allowlist"
+  exit 1
+fi
 if [[ "$REQUIRE_DEVELOPER_ID" -eq 1 ]]; then
   SIGNATURE_DETAILS="$(codesign -dv --verbose=4 "$APP" 2>&1)"
   if ! rg -q '^Authority=Developer ID Application:' <<<"$SIGNATURE_DETAILS"; then
@@ -70,6 +80,15 @@ if [[ "$REQUIRE_DEVELOPER_ID" -eq 1 ]]; then
     print -u2 "app signature is missing a secure timestamp"
     exit 1
   fi
+  if [[ "$(print -r -- "$SIGNATURE_DETAILS" | sed -n 's/^TeamIdentifier=//p' | head -n 1)" != "$EXPECTED_RELEASE_TEAM_ID" ]]; then
+    print -u2 "app signature TeamIdentifier is not the reviewed project team"
+    exit 1
+  fi
+  DESIGNATED_REQUIREMENT="$(codesign -dr - "$APP" 2>&1)"
+  if ! rg -Fq "certificate leaf[subject.OU] = $EXPECTED_RELEASE_TEAM_ID" <<<"$DESIGNATED_REQUIREMENT"; then
+    print -u2 "app designated requirement is not pinned to the reviewed project team"
+    exit 1
+  fi
 fi
 file "$BINARY" | rg -q 'Mach-O 64-bit executable'
 
@@ -79,6 +98,14 @@ if [[ "$UNIVERSAL" -eq 1 ]]; then
   for required in arm64 x86_64; do
     if ! print -r -- "$ARCHS" | tr ' ' '\n' | rg -qx "$required"; then
       print -u2 "missing architecture in universal binary: $required"
+      exit 1
+    fi
+  done
+  for arch in arm64 x86_64; do
+    BUILD_INFO="$(xcrun vtool -show-build -arch "$arch" "$BINARY")"
+    if ! rg -q '^    minos 11\.0$' <<<"$BUILD_INFO"; then
+      print -u2 "unexpected minimum macOS version for $arch (expected 11.0)"
+      print -u2 -- "$BUILD_INFO"
       exit 1
     fi
   done

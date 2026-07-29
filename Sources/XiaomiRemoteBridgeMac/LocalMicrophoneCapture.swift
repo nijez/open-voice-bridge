@@ -26,6 +26,15 @@ enum MicrophoneAuthorization: Equatable {
     }
 }
 
+enum MicrophonePermissionNextStep: Equatable {
+    case requestAccess
+    case openSystemSettings
+
+    static func resolve(for authorization: MicrophoneAuthorization) -> Self {
+        authorization == .notDetermined ? .requestAccess : .openSystemSettings
+    }
+}
+
 /// Thin wrapper over `AVCaptureDevice` audio authorisation. The app never asks
 /// for the microphone implicitly — only the explicit Settings button calls
 /// `request`. Uses its own TCC service; it does not reuse Accessibility or Input

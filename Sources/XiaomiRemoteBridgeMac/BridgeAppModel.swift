@@ -452,13 +452,12 @@ final class BridgeAppModel: ObservableObject, XiaomiBluetoothBridgeDelegate {
 
     func requestMicrophonePermission() {
         let current = MicrophonePermission.status
-        guard current == .notDetermined else {
-            // Already decided: the system will not reprompt, so send the user to
-            // the microphone privacy pane instead of silently doing nothing.
+        guard MicrophonePermissionNextStep.resolve(for: current) == .requestAccess else {
+            // Already decided: the system will not reprompt. "查看" for an
+            // authorised app and "请求权限" for a denied app must both open the
+            // same privacy pane instead of silently doing nothing.
             refreshMicrophonePermission()
-            if current != .authorized {
-                openPrivacyPane("Privacy_Microphone")
-            }
+            openPrivacyPane("Privacy_Microphone")
             return
         }
         MicrophonePermission.request { [weak self] granted in

@@ -765,6 +765,13 @@ check(
         MicrophoneAuthorization.authorized.statusText(featureEnabled: true) == "已授权",
     "Mac Fn microphone permission text distinguishes disabled feature from TCC denial"
 )
+check(
+    MicrophonePermissionNextStep.resolve(for: .notDetermined) == .requestAccess &&
+        MicrophonePermissionNextStep.resolve(for: .authorized) == .openSystemSettings &&
+        MicrophonePermissionNextStep.resolve(for: .denied) == .openSystemSettings &&
+        MicrophonePermissionNextStep.resolve(for: .restricted) == .openSystemSettings,
+    "Mac Fn microphone permission button requests once and opens Settings for every decided state"
+)
 if let defaults = UserDefaults(suiteName: suiteName) {
     let saved = try JSONEncoder().encode([
         RemoteButton.back.rawValue: ButtonAction.disabled,
