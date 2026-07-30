@@ -20,6 +20,7 @@ enum XiaomiRemoteBridgeMacApp {
 @MainActor
 private final class XiaomiRemoteBridgeAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
     private let model = BridgeAppModel()
+    private let updateController = AppUpdateController()
     private var statusItem: NSStatusItem?
     private var settingsWindowController: NSWindowController?
     private var subscriptions = Set<AnyCancellable>()
@@ -39,6 +40,7 @@ private final class XiaomiRemoteBridgeAppDelegate: NSObject, NSApplicationDelega
         observeModel()
         model.reconcileLaunchAtLogin()
         model.startIfNeeded()
+        updateController.start()
         refreshMenuStatus()
     }
 
@@ -106,7 +108,6 @@ private final class XiaomiRemoteBridgeAppDelegate: NSObject, NSApplicationDelega
         bridgeToggleItem.action = #selector(toggleBridge)
         reconnectItem.target = self
         reconnectItem.action = #selector(reconnect)
-
         let menu = NSMenu()
         menu.delegate = self
         menu.addItem(connectionItem)
@@ -116,6 +117,7 @@ private final class XiaomiRemoteBridgeAppDelegate: NSObject, NSApplicationDelega
         menu.addItem(.separator())
         menu.addItem(bridgeToggleItem)
         menu.addItem(reconnectItem)
+        menu.addItem(updateController.makeCheckForUpdatesMenuItem())
         menu.addItem(menuItem("打开设置…", action: #selector(showSettings)))
         menu.addItem(menuItem("显示日志", action: #selector(showLog)))
         menu.addItem(.separator())
@@ -260,7 +262,9 @@ private final class XiaomiRemoteBridgeAppDelegate: NSObject, NSApplicationDelega
     }
 
     private func makeSettingsWindowController() -> NSWindowController {
-        let hostingController = NSHostingController(rootView: SettingsView(model: model))
+        let hostingController = NSHostingController(
+            rootView: SettingsView(model: model, updateController: updateController)
+        )
         // The window owns its size. Letting NSHostingController also push the
         // SwiftUI tree's preferred/intrinsic size back into a resizable AppKit
         // window creates a two-way sizing loop on newer macOS releases:

@@ -11,9 +11,22 @@ let package = Package(
         )
     ],
     targets: [
+        .binaryTarget(
+            name: "Sparkle",
+            path: "Vendor/Sparkle.xcframework"
+        ),
         .executableTarget(
             name: "XiaomiRemoteBridgeMac",
-            path: "Sources/XiaomiRemoteBridgeMac"
+            dependencies: [
+                "Sparkle"
+            ],
+            path: "Sources/XiaomiRemoteBridgeMac",
+            linkerSettings: [
+                .unsafeFlags([
+                    "-Xlinker", "-rpath",
+                    "-Xlinker", "@executable_path/../Frameworks"
+                ])
+            ]
         ),
         .testTarget(
             name: "XiaomiRemoteBridgeMacTests",

@@ -52,17 +52,22 @@ if [[ "$UNIVERSAL" -eq 1 ]]; then
     "$ARM64_BIN_DIR/$APP_NAME" \
     "$X86_64_BIN_DIR/$APP_NAME"
   BIN_PATH="$UNIVERSAL_BIN"
+  FRAMEWORK_SOURCE="$ARM64_BIN_DIR/Sparkle.framework"
 else
   xcrun swift build -c "$CONFIGURATION"
-  BIN_PATH="$(xcrun swift build -c "$CONFIGURATION" --show-bin-path)/$APP_NAME"
+  BIN_DIR="$(xcrun swift build -c "$CONFIGURATION" --show-bin-path)"
+  BIN_PATH="$BIN_DIR/$APP_NAME"
+  FRAMEWORK_SOURCE="$BIN_DIR/Sparkle.framework"
 fi
+
+test -d "$FRAMEWORK_SOURCE"
 
 case "$APP_DIR" in
   "$ROOT/dist/"*.app) ;;
   *) print -u2 "refusing to clean unexpected app path: $APP_DIR"; exit 1 ;;
 esac
 rm -rf -- "$APP_DIR"
-mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
+mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources" "$APP_DIR/Contents/Frameworks"
 ditto --norsrc --noextattr --noqtn --noacl \
   "$BIN_PATH" "$APP_DIR/Contents/MacOS/$APP_NAME"
 strip -S -x "$APP_DIR/Contents/MacOS/$APP_NAME"
@@ -74,6 +79,8 @@ ditto --norsrc --noextattr --noqtn --noacl \
   "$ROOT/README.md" "$APP_DIR/Contents/Resources/README.md"
 ditto --norsrc --noextattr --noqtn --noacl \
   "$ROOT/THIRD_PARTY_NOTICES.md" "$APP_DIR/Contents/Resources/THIRD_PARTY_NOTICES.md"
+ditto --norsrc --noextattr --noqtn --noacl \
+  "$ROOT/Resources/Sparkle-LICENSE.txt" "$APP_DIR/Contents/Resources/Sparkle-LICENSE.txt"
 ditto --norsrc --noextattr --noqtn --noacl \
   "$ROOT/COPYRIGHT" "$APP_DIR/Contents/Resources/COPYRIGHT"
 ditto --norsrc --noextattr --noqtn --noacl \
@@ -88,11 +95,36 @@ ditto --norsrc --noextattr --noqtn --noacl \
 ditto --norsrc --noextattr --noqtn --noacl \
   "$ROOT/device-profiles" \
   "$APP_DIR/Contents/Resources/device-profiles"
+ditto --norsrc --noextattr --noqtn --noacl \
+  "$FRAMEWORK_SOURCE" \
+  "$APP_DIR/Contents/Frameworks/Sparkle.framework"
+
+SPARKLE_FRAMEWORK="$APP_DIR/Contents/Frameworks/Sparkle.framework"
+SPARKLE_VERSION_DIR="$SPARKLE_FRAMEWORK/Versions/B"
+test -d "$SPARKLE_VERSION_DIR/XPCServices/Installer.xpc"
+test -d "$SPARKLE_VERSION_DIR/XPCServices/Downloader.xpc"
+test -x "$SPARKLE_VERSION_DIR/Autoupdate"
+test -d "$SPARKLE_VERSION_DIR/Updater.app"
+
+sign_sparkle_components() {
+  local identity="$1"
+  shift
+  local common_args=(--force --options runtime --sign "$identity" "$@")
+
+  codesign "${common_args[@]}" \
+    "$SPARKLE_VERSION_DIR/XPCServices/Installer.xpc"
+  codesign "${common_args[@]}" --preserve-metadata=entitlements \
+    "$SPARKLE_VERSION_DIR/XPCServices/Downloader.xpc"
+  codesign "${common_args[@]}" "$SPARKLE_VERSION_DIR/Autoupdate"
+  codesign "${common_args[@]}" "$SPARKLE_VERSION_DIR/Updater.app"
+  codesign "${common_args[@]}" "$SPARKLE_FRAMEWORK"
+}
+
 if [[ "$RELEASE_SIGN" -eq 1 ]]; then
   print "codesign identity: Developer ID Application (release)"
+  sign_sparkle_components "$LOCAL_SIGNING_IDENTITY" --timestamp
   codesign \
     --force \
-    --deep \
     --entitlements "$ENTITLEMENTS" \
     --options runtime \
     --timestamp \
@@ -100,15 +132,17 @@ if [[ "$RELEASE_SIGN" -eq 1 ]]; then
     "$APP_DIR"
 elif rg -Fq "\"$LOCAL_SIGNING_IDENTITY\"" <<<"$AVAILABLE_SIGNING_IDENTITIES"; then
   print "codesign identity: $LOCAL_SIGNING_IDENTITY"
+  sign_sparkle_components "$LOCAL_SIGNING_IDENTITY"
   codesign \
     --force \
-    --deep \
     --entitlements "$ENTITLEMENTS" \
+    --options runtime \
     --sign "$LOCAL_SIGNING_IDENTITY" \
     "$APP_DIR"
 else
   print "codesign identity: ad-hoc fallback"
-  codesign --force --deep --entitlements "$ENTITLEMENTS" --sign - "$APP_DIR"
+  sign_sparkle_components -
+  codesign --force --entitlements "$ENTITLEMENTS" --options runtime --sign - "$APP_DIR"
 fi
 codesign --verify --deep --strict "$APP_DIR"
 

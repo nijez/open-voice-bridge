@@ -535,23 +535,33 @@ struct FunctionKeyFlagTrackerTests {
 
 @Suite("RC003 voice-key double-click bridge toggle")
 struct RemoteBridgeToggleGestureDetectorTests {
+    private func expectEdge(
+        _ detector: inout RemoteBridgeToggleGestureDetector,
+        _ edge: RemoteEventEdge,
+        at nowMs: UInt64,
+        toggles: Bool
+    ) {
+        let result = detector.handle(edge, nowMs: nowMs)
+        #expect(result == toggles)
+    }
+
     @Test func twoShortTapsInWindowToggleExactlyOnce() {
         var detector = RemoteBridgeToggleGestureDetector()
-        #expect(!detector.handle(.down, nowMs: 0))
-        #expect(!detector.handle(.up, nowMs: 100))
-        #expect(!detector.handle(.down, nowMs: 200))
-        #expect(detector.handle(.up, nowMs: 300))
+        expectEdge(&detector, .down, at: 0, toggles: false)
+        expectEdge(&detector, .up, at: 100, toggles: false)
+        expectEdge(&detector, .down, at: 200, toggles: false)
+        expectEdge(&detector, .up, at: 300, toggles: true)
         // Idle again: a lone tap does not toggle.
-        #expect(!detector.handle(.down, nowMs: 400))
-        #expect(!detector.handle(.up, nowMs: 460))
+        expectEdge(&detector, .down, at: 400, toggles: false)
+        expectEdge(&detector, .up, at: 460, toggles: false)
     }
 
     @Test func longPressNeverTogglesAndDoesNotArmAPair() {
         var detector = RemoteBridgeToggleGestureDetector()
-        #expect(!detector.handle(.down, nowMs: 0))
-        #expect(!detector.handle(.up, nowMs: 400)) // 400ms > 250 -> long press
-        #expect(!detector.handle(.down, nowMs: 450))
-        #expect(!detector.handle(.up, nowMs: 520))
+        expectEdge(&detector, .down, at: 0, toggles: false)
+        expectEdge(&detector, .up, at: 400, toggles: false) // long press
+        expectEdge(&detector, .down, at: 450, toggles: false)
+        expectEdge(&detector, .up, at: 520, toggles: false)
     }
 
     @Test func longSecondPressDoesNotToggle() {
@@ -559,20 +569,20 @@ struct RemoteBridgeToggleGestureDetectorTests {
         _ = detector.handle(.down, nowMs: 0)
         _ = detector.handle(.up, nowMs: 100)
         _ = detector.handle(.down, nowMs: 200)
-        #expect(!detector.handle(.up, nowMs: 700))
+        expectEdge(&detector, .up, at: 700, toggles: false)
     }
 
     @Test func slowRepeatedAndMissingUpNeverToggle() {
         var slow = RemoteBridgeToggleGestureDetector()
         _ = slow.handle(.down, nowMs: 0)
         _ = slow.handle(.up, nowMs: 100)
-        #expect(!slow.handle(.down, nowMs: 500)) // past window -> restart
-        #expect(!slow.handle(.up, nowMs: 560))
+        expectEdge(&slow, .down, at: 500, toggles: false) // past window
+        expectEdge(&slow, .up, at: 560, toggles: false)
 
         var repeated = RemoteBridgeToggleGestureDetector()
         _ = repeated.handle(.down, nowMs: 0)
-        #expect(!repeated.handle(.down, nowMs: 50)) // repeated down -> restart
-        #expect(!repeated.handle(.up, nowMs: 100))
+        expectEdge(&repeated, .down, at: 50, toggles: false) // repeated down
+        expectEdge(&repeated, .up, at: 100, toggles: false)
     }
 
     @Test func resetDropsInflightGesture() {
@@ -580,8 +590,8 @@ struct RemoteBridgeToggleGestureDetectorTests {
         _ = detector.handle(.down, nowMs: 0)
         _ = detector.handle(.up, nowMs: 100)
         detector.reset()
-        #expect(!detector.handle(.down, nowMs: 200)) // would-be second tap
-        #expect(!detector.handle(.up, nowMs: 260))
+        expectEdge(&detector, .down, at: 200, toggles: false)
+        expectEdge(&detector, .up, at: 260, toggles: false)
     }
 
     @Test func sameGestureTogglesAgainToRestore() {
@@ -589,11 +599,11 @@ struct RemoteBridgeToggleGestureDetectorTests {
         _ = detector.handle(.down, nowMs: 0)
         _ = detector.handle(.up, nowMs: 80)
         _ = detector.handle(.down, nowMs: 150)
-        #expect(detector.handle(.up, nowMs: 220)) // disable
+        expectEdge(&detector, .up, at: 220, toggles: true) // disable
         _ = detector.handle(.down, nowMs: 1000)
         _ = detector.handle(.up, nowMs: 1080)
         _ = detector.handle(.down, nowMs: 1150)
-        #expect(detector.handle(.up, nowMs: 1220)) // restore
+        expectEdge(&detector, .up, at: 1220, toggles: true) // restore
     }
 
     @Test func boundariesAreInclusiveAndOneMsPastFails() {
@@ -601,18 +611,184 @@ struct RemoteBridgeToggleGestureDetectorTests {
         _ = inclusive.handle(.down, nowMs: 0)
         _ = inclusive.handle(.up, nowMs: 250)   // tap == 250
         _ = inclusive.handle(.down, nowMs: 350) // window == 350
-        #expect(inclusive.handle(.up, nowMs: 600))
+        expectEdge(&inclusive, .up, at: 600, toggles: true)
 
         var over = RemoteBridgeToggleGestureDetector()
         _ = over.handle(.down, nowMs: 0)
         _ = over.handle(.up, nowMs: 100)
         _ = over.handle(.down, nowMs: 351)      // 1ms past the window
-        #expect(!over.handle(.up, nowMs: 400))
+        expectEdge(&over, .up, at: 400, toggles: false)
     }
 
     @Test func frozenConstantsMatchTheContract() {
         #expect(RemoteBridgeToggleGesture.doubleClickWindowMs == 350)
         #expect(RemoteBridgeToggleGesture.singleTapMaxMs == 250)
+    }
+}
+
+@Suite("RC003 multi-source double-click coordinator")
+struct RemoteBridgeToggleCoordinatorTests {
+    private func expectEdge(
+        _ coordinator: inout RemoteBridgeToggleCoordinator,
+        _ edge: RemoteEventEdge,
+        source: RemoteBridgeToggleSource,
+        at nowMs: UInt64,
+        toggles: Bool
+    ) {
+        let result = coordinator.handle(edge, source: source, nowMs: nowMs)
+        #expect(result == toggles)
+    }
+
+    @Test func atvvCompletesGestureWhenHidDropsTheRapidReports() {
+        var coordinator = RemoteBridgeToggleCoordinator()
+        expectEdge(&coordinator, .down, source: .atvv, at: 0, toggles: false)
+        expectEdge(&coordinator, .up, source: .atvv, at: 70, toggles: false)
+        expectEdge(&coordinator, .down, source: .atvv, at: 150, toggles: false)
+        expectEdge(&coordinator, .up, source: .atvv, at: 220, toggles: true)
+    }
+
+    @Test func mirroredHidAndAtvvGestureTogglesOnlyOnce() {
+        var coordinator = RemoteBridgeToggleCoordinator()
+        expectEdge(&coordinator, .down, source: .hid, at: 0, toggles: false)
+        expectEdge(&coordinator, .down, source: .atvv, at: 8, toggles: false)
+        expectEdge(&coordinator, .up, source: .hid, at: 70, toggles: false)
+        expectEdge(&coordinator, .up, source: .atvv, at: 78, toggles: false)
+        expectEdge(&coordinator, .down, source: .hid, at: 150, toggles: false)
+        expectEdge(&coordinator, .down, source: .atvv, at: 158, toggles: false)
+        expectEdge(&coordinator, .up, source: .hid, at: 220, toggles: true)
+        // The HID completion reset both source detectors. The mirrored ATVV up
+        // is therefore an orphan release and cannot undo the first toggle.
+        expectEdge(&coordinator, .up, source: .atvv, at: 228, toggles: false)
+    }
+
+    @Test func lateMirroredSecondTapCannotArmTheNextGesture() {
+        var coordinator = RemoteBridgeToggleCoordinator()
+        // HID finishes before the mirrored ATVV second tap has even started.
+        expectEdge(&coordinator, .down, source: .hid, at: 0, toggles: false)
+        expectEdge(&coordinator, .up, source: .hid, at: 60, toggles: false)
+        expectEdge(&coordinator, .down, source: .hid, at: 150, toggles: false)
+        expectEdge(&coordinator, .up, source: .hid, at: 220, toggles: true)
+        expectEdge(&coordinator, .down, source: .atvv, at: 230, toggles: false)
+        expectEdge(&coordinator, .up, source: .atvv, at: 280, toggles: false)
+
+        // One later ATVV tap is a fresh first tap, not the second half of the
+        // delayed mirror above.
+        expectEdge(&coordinator, .down, source: .atvv, at: 500, toggles: false)
+        expectEdge(&coordinator, .up, source: .atvv, at: 560, toggles: false)
+    }
+
+    @Test func missingMirrorDoesNotDisableTheFallbackForever() {
+        var coordinator = RemoteBridgeToggleCoordinator()
+        expectEdge(&coordinator, .down, source: .hid, at: 0, toggles: false)
+        expectEdge(&coordinator, .up, source: .hid, at: 60, toggles: false)
+        expectEdge(&coordinator, .down, source: .hid, at: 150, toggles: false)
+        expectEdge(&coordinator, .up, source: .hid, at: 220, toggles: true)
+
+        // No mirrored ATVV edge arrives. After the bounded isolation expires,
+        // ATVV can independently recognise a restore gesture.
+        expectEdge(&coordinator, .down, source: .atvv, at: 600, toggles: false)
+        expectEdge(&coordinator, .up, source: .atvv, at: 660, toggles: false)
+        expectEdge(&coordinator, .down, source: .atvv, at: 740, toggles: false)
+        expectEdge(&coordinator, .up, source: .atvv, at: 800, toggles: true)
+    }
+
+    @Test func longPressFromEitherSourceNeverToggles() {
+        for source in [RemoteBridgeToggleSource.hid, .atvv] {
+            var coordinator = RemoteBridgeToggleCoordinator()
+            expectEdge(&coordinator, .down, source: source, at: 0, toggles: false)
+            expectEdge(&coordinator, .up, source: source, at: 400, toggles: false)
+        }
+    }
+}
+
+@Suite("ATVV voice-control edge tracker")
+struct RemoteVoiceControlEdgeTrackerTests {
+    @Test func micOpenAndStreamStartBecomeOneDown() {
+        var tracker = RemoteVoiceControlEdgeTracker()
+        let down = tracker.update(active: true)
+        let duplicateDown = tracker.update(active: true)
+        let up = tracker.update(active: false)
+        let duplicateUp = tracker.update(active: false)
+        #expect(down == .down)
+        #expect(duplicateDown == nil)
+        #expect(up == .up)
+        #expect(duplicateUp == nil)
+    }
+
+    @Test func resetDropsAStaleHeldSessionWithoutInventingAnUp() {
+        var tracker = RemoteVoiceControlEdgeTracker()
+        _ = tracker.update(active: true)
+        tracker.reset()
+        #expect(!tracker.isDown)
+        let orphanUp = tracker.update(active: false)
+        let nextDown = tracker.update(active: true)
+        #expect(orphanUp == nil)
+        #expect(nextDown == .down)
+    }
+
+    @Test func pauseDrainsDuplicateStartAndStopBeforeAcceptingANewPress() {
+        var tracker = RemoteVoiceControlEdgeTracker()
+        #expect(tracker.update(active: true) == .down) // MIC_OPEN
+        tracker.cancelCurrentPress()
+        #expect(!tracker.isDown)
+        #expect(tracker.update(active: true) == nil)   // same press: STREAM_START
+        #expect(tracker.update(active: false) == nil)  // same press: STOP
+        #expect(tracker.update(active: true) == .down) // next physical press
+    }
+
+    @Test func pauseBetweenMicOpenAndStreamStartCannotArmAnAccidentalRestore() {
+        var tracker = RemoteVoiceControlEdgeTracker()
+        var coordinator = RemoteBridgeToggleCoordinator()
+
+        let micOpen = tracker.update(active: true)
+        #expect(micOpen == .down)
+        if let micOpen {
+            let toggled = coordinator.handle(micOpen, source: .atvv, nowMs: 0)
+            #expect(!toggled)
+        }
+
+        // Settings/menu pause invalidates the partial gesture, then drains the
+        // remaining controls from the same physical press.
+        coordinator.reset()
+        tracker.cancelCurrentPress()
+        #expect(tracker.update(active: true) == nil)  // delayed STREAM_START
+        #expect(tracker.update(active: false) == nil) // STOP
+
+        // A single tap after the drain is only a first tap and cannot restore.
+        let singleDown = tracker.update(active: true)
+        #expect(singleDown == .down)
+        if let singleDown {
+            let toggled = coordinator.handle(singleDown, source: .atvv, nowMs: 100)
+            #expect(!toggled)
+        }
+        let singleUp = tracker.update(active: false)
+        #expect(singleUp == .up)
+        if let singleUp {
+            let toggled = coordinator.handle(singleUp, source: .atvv, nowMs: 160)
+            #expect(!toggled)
+        }
+
+        // After that tap has expired, one complete fresh double-click restores.
+        let firstDown = tracker.update(active: true)
+        let firstDownResult = firstDown.map {
+            coordinator.handle($0, source: .atvv, nowMs: 500)
+        }
+        #expect(firstDownResult == false)
+        let firstUp = tracker.update(active: false)
+        let firstUpResult = firstUp.map {
+            coordinator.handle($0, source: .atvv, nowMs: 560)
+        }
+        #expect(firstUpResult == false)
+        let secondDown = tracker.update(active: true)
+        let secondDownResult = secondDown.map {
+            coordinator.handle($0, source: .atvv, nowMs: 650)
+        }
+        #expect(secondDownResult == false)
+        let secondUp = tracker.update(active: false)
+        let secondUpResult = secondUp.map {
+            coordinator.handle($0, source: .atvv, nowMs: 710)
+        }
+        #expect(secondUpResult == true)
     }
 }
 
@@ -717,7 +893,8 @@ struct RemoteVoiceKeyForcedReleaseTests {
         _ = detector.handle(.down, nowMs: 0)
         _ = detector.handle(.up, nowMs: 80)
         _ = detector.handle(.down, nowMs: 150)
-        #expect(detector.handle(.up, nowMs: 210)) // genuine report .up is not suppressed
+        let toggled = detector.handle(.up, nowMs: 210)
+        #expect(toggled) // genuine report .up is not suppressed
     }
 
     @Test func removalRevokeStopDuringSecondDownDoNotToggleButStillRelease() {
@@ -743,8 +920,10 @@ struct RemoteVoiceKeyForcedReleaseTests {
         )
         #expect(!toggled)
         // A later in-window tap must be a fresh first tap, not the second of an old pair.
-        #expect(!detector.handle(.down, nowMs: 200))
-        #expect(!detector.handle(.up, nowMs: 260))
+        let laterDown = detector.handle(.down, nowMs: 200)
+        let laterUp = detector.handle(.up, nowMs: 260)
+        #expect(!laterDown)
+        #expect(!laterUp)
     }
 }
 

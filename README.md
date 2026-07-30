@@ -36,7 +36,7 @@ Profile 只记录可核对的事实与状态，不是驱动。只有代码、自
 
 ## 第一个适配器：Xiaomi RC003 for macOS
 
-现有 `XiaomiRemoteBridgeMac` target、应用显示名和 Bundle ID 暂时保留，避免总项目改名导致已安装用户重新授予蓝牙、输入监控和辅助功能权限。当前版本为 v0.3.9，包含 Mac 物理 Fn 麦克风兼容、真正鼠标右键、语音键双击暂停/恢复、所有实体键的自定义快捷键录制，以及 Developer ID 正式签名与 Apple 公证发行链。v0.3.9 同时补齐 Hardened Runtime 的音频输入 entitlement，并在打包验证中强制检查，修复正式签名包中系统麦克风开关已开启但应用仍显示拒绝的问题。
+现有 `XiaomiRemoteBridgeMac` target、应用显示名和 Bundle ID 暂时保留，避免总项目改名导致已安装用户重新授予蓝牙、输入监控和辅助功能权限。当前版本为 v0.4.0，包含 Mac 物理 Fn 麦克风兼容、真正鼠标右键、语音键双击暂停/恢复、所有实体键的自定义快捷键录制、Developer ID 正式签名与 Apple 公证发行链，以及基于 Sparkle 2 的应用内更新。更新包同时使用 EdDSA 与 Developer ID 校验；发现新版本后由用户确认安装，不静默安装，也不发送系统画像。
 
 当前功能：
 
@@ -132,6 +132,8 @@ ARN9 普通款使用同一语音/Fn 行为和同一套默认动作，但映射�
 
 v0.3.7 起的 macOS 正式包使用 Apple Developer ID Application 同时签署 App 本体和 DMG 容器，启用 hardened runtime、安全时间戳并装订 Apple 公证 ticket。v0.3.6 及更早公开测试包仍是 ad-hoc/未公证历史产物。只应从本项目 Release 或你信任的分享者处取安装包。维护者的本地开发构建仍可使用 `Open Voice Bridge Local Code Signing` 持久本机身份或 ad-hoc 回退；只有显式 `--release-sign` 构建并通过公证验证的 DMG 才是正式发行包。
 
+v0.4.0 是首个带应用内更新的版本。由于 v0.3.9 及更早版本没有更新器，需要手动安装 v0.4.0 一次；以后可从菜单栏“检查更新…”或“设置 → 连接 → 应用”检查。默认每天最多自动检查一次，发现更新会显示版本和说明并等待确认，不会静默安装。可随时关闭“自动检查更新”；更新检查不上传语音、设备信息或系统画像。
+
 #### 3. 让遥控器进入配对状态
 
 1. 打开 Mac 的蓝牙设置；
@@ -212,6 +214,8 @@ RC003 的语音是通过 ATVV 把**遥控器**麦克风写入 BlackHole 的；�
 
 ### 开发者构建与验证
 
+维护约定：每个新的 macOS 版本候选在完成自动测试和独立代码审查后，必须先把同一份正式签名、公证产物覆盖安装到维护者本机，完成版本、权限、空闲 CPU、真实遥控器按键与语音验收；本机验收通过并完成发布物独立复审后，才允许推送 GitHub Release。中途的排障或问答不会跳过或中止这条发布链。
+
 ```bash
 ./scripts/test.sh
 ./scripts/build-app.sh --universal
@@ -230,13 +234,19 @@ RC003 的语音是通过 ATVV 把**遥控器**麦克风写入 BlackHole 的；�
 ```bash
 ./scripts/store-notary-credentials.sh "OpenVoiceBridge Notary"
 OVB_CODESIGN_IDENTITY='Developer ID Application: <name> (<team-id>)' \
-  ./scripts/build-dmg.sh --release-sign
+  ./scripts/build-app.sh --universal --release-sign
+./scripts/notarize-update-app.sh \
+  --keychain-profile "OpenVoiceBridge Notary"
+OVB_CODESIGN_IDENTITY='Developer ID Application: <name> (<team-id>)' \
+  ./scripts/build-dmg.sh --release-sign --use-existing-app
 ./scripts/notarize-dmg.sh \
   --keychain-profile "OpenVoiceBridge Notary" \
   "dist/小米遥控器桥接-<version>.dmg"
 ```
 
 `store-notary-credentials.sh` 会交互式请求 Apple Account、Team ID 和 App 专用密码；密码只进入 macOS 钥匙串，不应写进脚本、环境变量、命令历史或仓库。
+
+Sparkle 的私有 EdDSA 更新密钥同样只保存在维护者登录钥匙串中，仓库只保存公开验证密钥。`prepare-sparkle-tools.sh` 只下载官方 2.9.2 工具包并验证固定 SHA-256；`notarize-update-app.sh` 在应用公证后生成更新 ZIP 和签名 appcast。修改已签名的 ZIP、发布说明或 appcast 后必须重新生成，不能手工补签。
 
 当前 macOS 11 部署目标已完成双架构编译与打包校验，但尚未在真实 macOS 11 机器上运行验收。
 

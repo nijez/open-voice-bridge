@@ -12,10 +12,12 @@ SOURCE_ROOT="open-voice-bridge-$VERSION-source"
 SOURCE_ARCHIVE="$DISPLAY_NAME-$VERSION-对应源码.zip"
 EXPECTED_RELEASE_TEAM_ID="T486HD59BP"
 RELEASE_SIGN=0
+USE_EXISTING_APP=0
 
 for arg in "$@"; do
   case "$arg" in
     --release-sign) RELEASE_SIGN=1 ;;
+    --use-existing-app) USE_EXISTING_APP=1 ;;
     *) print -u2 "unknown argument: $arg"; exit 1 ;;
   esac
 done
@@ -50,7 +52,9 @@ if [[ "$RELEASE_SIGN" -eq 1 ]]; then
   APP_BUILD_ARGS+=(--release-sign)
   APP_VERIFY_ARGS+=(--require-developer-id)
 fi
-"$ROOT/scripts/build-app.sh" "${APP_BUILD_ARGS[@]}"
+if [[ "$USE_EXISTING_APP" -eq 0 ]]; then
+  "$ROOT/scripts/build-app.sh" "${APP_BUILD_ARGS[@]}"
+fi
 "$ROOT/scripts/verify-app.sh" "${APP_VERIFY_ARGS[@]}" "$APP_DIR"
 
 ditto --norsrc --noextattr --noqtn --noacl \
@@ -65,10 +69,31 @@ ditto --norsrc --noextattr --noqtn --noacl \
 ditto --norsrc --noextattr --noqtn --noacl \
   "$ROOT/THIRD_PARTY_NOTICES.md" "$STAGING/THIRD_PARTY_NOTICES.md"
 
-for item in Package.swift Sources Tests scripts Resources device-profiles specs README.md LICENSE COPYRIGHT THIRD_PARTY_NOTICES.md; do
+for item in Package.swift Sources Tests scripts Resources Vendor device-profiles specs release-notes README.md LICENSE COPYRIGHT THIRD_PARTY_NOTICES.md; do
   ditto --norsrc --noextattr --noqtn --noacl \
     "$ROOT/$item" "$SOURCE_DIR/$item"
 done
+
+if [[ "$RELEASE_SIGN" -eq 1 ]]; then
+  # Apple notarization recursively inspects executable dependencies even when
+  # they are included only inside the corresponding-source archive.  Re-sign
+  # the copied Sparkle binary dependency inner-first, leaving repository files
+  # untouched while keeping the source archive buildable offline.
+  SOURCE_SPARKLE_FRAMEWORK="$SOURCE_DIR/Vendor/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
+  SOURCE_SPARKLE_VERSION_DIR="$SOURCE_SPARKLE_FRAMEWORK/Versions/B"
+  codesign --force --options runtime --timestamp --sign "$OVB_CODESIGN_IDENTITY" \
+    "$SOURCE_SPARKLE_VERSION_DIR/XPCServices/Installer.xpc"
+  codesign --force --options runtime --timestamp --sign "$OVB_CODESIGN_IDENTITY" \
+    --preserve-metadata=entitlements \
+    "$SOURCE_SPARKLE_VERSION_DIR/XPCServices/Downloader.xpc"
+  codesign --force --options runtime --timestamp --sign "$OVB_CODESIGN_IDENTITY" \
+    "$SOURCE_SPARKLE_VERSION_DIR/Autoupdate"
+  codesign --force --options runtime --timestamp --sign "$OVB_CODESIGN_IDENTITY" \
+    "$SOURCE_SPARKLE_VERSION_DIR/Updater.app"
+  codesign --force --options runtime --timestamp --sign "$OVB_CODESIGN_IDENTITY" \
+    "$SOURCE_SPARKLE_FRAMEWORK"
+  codesign --verify --deep --strict "$SOURCE_SPARKLE_FRAMEWORK"
+fi
 
 for item in ARCHITECTURE.md ADDING_A_DEVICE.md; do
   ditto --norsrc --noextattr --noqtn --noacl \
