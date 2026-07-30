@@ -40,6 +40,13 @@ private func catalogFixture(id: String, status: String = "implemented") -> Strin
     """
 }
 
+check(
+    UpdatePolicy.feedURLString == "https://raw.githubusercontent.com/nijez/open-voice-bridge/main/appcast.xml" &&
+        UpdatePolicy.scheduledCheckInterval == 86_400 &&
+        !UpdatePolicy.allowsAutomaticInstallation,
+    "update policy pins the official feed, daily interval, and user-confirmed installation"
+)
+
 let versionOne = ATVVCapabilities.parse(Data([0x0B, 0x01, 0x00, 0x02, 0x03, 0x00, 0x78]))
 check(
     versionOne?.version == 0x0100 &&

@@ -66,9 +66,9 @@ final class BridgeAppModel: ObservableObject, XiaomiBluetoothBridgeDelegate {
     private var suppressedHIDPermissionReminderForCurrentLaunch: HIDPermissionRequest?
     private var voiceFunctionKeyLatch = VoiceFunctionKeyLatch()
     private var remoteVoiceKeyIsDown = false
-    /// Recognises the RC003 voice-key double-click that toggles the bridge. It only
-    /// observes the single voice-key edge stream, so it never delays hold-to-talk.
-    private var toggleDetector = RemoteBridgeToggleGestureDetector()
+    /// Recognises the RC003 voice-key double-click from independent HID and ATVV
+    /// sources. Neither source delays or consumes the hold-to-talk path.
+    private var toggleCoordinator = RemoteBridgeToggleCoordinator()
     /// True when the last disable could not restore the F5→Fn system mapping, so
     /// the bridge stays in a failed-disabled state with a visible warning.
     private var mappingRestoreFailed = false
@@ -166,7 +166,7 @@ final class BridgeAppModel: ObservableObject, XiaomiBluetoothBridgeDelegate {
         cancelTestToneIfNeeded(statusMessage: "应用已停止", logReason: "app_stop")
         // Drop any in-flight double-click so a late edge cannot complete an old
         // toggle across teardown.
-        toggleDetector.reset()
+        toggleCoordinator.reset()
         if activeDeviceProfile == .xiaomiRC003 {
             remoteVoiceKeyMonitor.stop()
             localMicBridge.teardown()
@@ -283,7 +283,7 @@ final class BridgeAppModel: ObservableObject, XiaomiBluetoothBridgeDelegate {
         // A reader re-selection or health flip can drop edges mid-gesture, so clear
         // any in-flight double-click here: a stale edge (reader unhealthy, device
         // generation change, permission loss) must never complete an old toggle.
-        toggleDetector.reset()
+        toggleCoordinator.reset()
         let hidReading = hidMonitor.isReadingRemoteKeys
         let target = RemoteSourceReaderPolicy.targetReader(
             localFnMicEnabled: settings.localFnMicEnabled,
@@ -348,8 +348,17 @@ final class BridgeAppModel: ObservableObject, XiaomiBluetoothBridgeDelegate {
     private func handleRemoteVoiceKeyEdge(_ edge: RemoteEventEdge) {
         remoteVoiceKeyIsDown = edge == .down
         localMicBridge.noteRemoteSource(edge)
+        handleBridgeToggleEdge(edge, source: .hid)
+    }
+
+    private func handleBridgeToggleEdge(
+        _ edge: RemoteEventEdge,
+        source: RemoteBridgeToggleSource
+    ) {
         guard settings.doubleClickToggleEnabled else { return }
-        if toggleDetector.handle(edge, nowMs: Self.monotonicMillis()) {
+        AppLogger.shared.write("VOICE GESTURE edge=\(edge) source=\(source.rawValue)")
+        if toggleCoordinator.handle(edge, source: source, nowMs: Self.monotonicMillis()) {
+            AppLogger.shared.write("VOICE GESTURE double_click source=\(source.rawValue)")
             setBridgeEnabled(!bridgeEnabled, source: "double_click")
         }
     }
@@ -365,13 +374,13 @@ final class BridgeAppModel: ObservableObject, XiaomiBluetoothBridgeDelegate {
     /// status that falsely omits the warning. It only reads reader state and sets a
     /// status string — it never restarts or re-selects a reader, so it cannot recurse.
     private func handleReaderLifecycleInvalidation() {
-        toggleDetector.reset()
+        toggleCoordinator.reset()
         updateBridgeRuntimeStatus()
     }
 
     func setDoubleClickToggleEnabled(_ enabled: Bool) {
         settings.doubleClickToggleEnabled = enabled
-        toggleDetector.reset()
+        toggleCoordinator.reset()
         // The reader may now be needed (or no longer needed) purely for gestures.
         updateRemoteVoiceKeyObservation()
     }
@@ -385,7 +394,7 @@ final class BridgeAppModel: ObservableObject, XiaomiBluetoothBridgeDelegate {
     func setBridgeEnabled(_ enabled: Bool, source: String) {
         guard enabled != bridgeEnabled else { return }
         bridgeEnabled = enabled
-        toggleDetector.reset()
+        toggleCoordinator.reset()
         applyBridgeRuntimeState(source: source)
     }
 
@@ -654,6 +663,7 @@ final class BridgeAppModel: ObservableObject, XiaomiBluetoothBridgeDelegate {
         if case .ready = state {
             // Keep the model reported during this connection's service discovery.
         } else {
+            toggleCoordinator.reset()
             detectedXiaomiModelNumber = nil
             remoteVoiceKeyMonitor.stop()
             hidMonitor.stop()
@@ -707,6 +717,17 @@ final class BridgeAppModel: ObservableObject, XiaomiBluetoothBridgeDelegate {
         isStreaming = false
         endRemoteAudioDiagnosticsSession()
         localMicBridge.noteRemoteVoice(active: false)
+    }
+
+    func bluetoothBridge(
+        _ bridge: XiaomiBluetoothBridge,
+        didObserveVoiceKey edge: RemoteEventEdge
+    ) {
+        guard settings.selectedDeviceProfile == .xiaomiRC003 else { return }
+        // ATVV is gesture fallback only. The local-microphone pre-marker must
+        // continue to use the earlier raw HID edge so a remapped physical Fn can
+        // never open the Mac microphone before RC003 preemption is known.
+        handleBridgeToggleEdge(edge, source: .atvv)
     }
 
     func bluetoothBridge(_ bridge: XiaomiBluetoothBridge, didDecode samples: [Int16]) {

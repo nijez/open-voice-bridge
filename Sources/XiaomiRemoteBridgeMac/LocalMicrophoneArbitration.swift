@@ -477,6 +477,126 @@ struct RemoteBridgeToggleGestureDetector {
     }
 }
 
+/// Independent physical-signal sources that can describe the same RC003 voice
+/// button gesture. HID is the primary low-latency source. ATVV control messages
+/// are a fallback for the real-world case where macOS drops a very short raw HID
+/// F5 report even though the remote still opens/closes its voice session.
+enum RemoteBridgeToggleSource: String, Equatable {
+    case hid
+    case atvv
+
+    var opposite: Self { self == .hid ? .atvv : .hid }
+}
+
+/// Runs one double-click detector per source rather than merging their edges.
+/// This is important: HID and ATVV can report the same physical tap a few
+/// milliseconds apart, and combining those edges would manufacture false taps.
+/// When either source recognises a complete double-click, both detectors reset,
+/// so the mirrored completion from the other source cannot toggle a second time.
+struct RemoteBridgeToggleCoordinator {
+    /// A mirrored completion from the other transport must not seed a new tap.
+    /// Use the same frozen interval as the gesture window: after this interval a
+    /// genuinely new gesture may use whichever source is healthy.
+    static let mirrorIsolationMs = RemoteBridgeToggleGesture.doubleClickWindowMs
+
+    private var hidDetector = RemoteBridgeToggleGestureDetector()
+    private var atvvDetector = RemoteBridgeToggleGestureDetector()
+    private var isolatedSource: RemoteBridgeToggleSource?
+    private var isolationExpiresAtMs: UInt64?
+
+    mutating func handle(
+        _ edge: RemoteEventEdge,
+        source: RemoteBridgeToggleSource,
+        nowMs: UInt64
+    ) -> Bool {
+        if source == isolatedSource, let isolationExpiresAtMs {
+            if nowMs <= isolationExpiresAtMs {
+                // Consume the delayed mirrored second tap. Its release proves the
+                // mirror has drained, so the source may participate in a later
+                // gesture without waiting for the full timeout.
+                if edge == .up { clearIsolation() }
+                return false
+            }
+            clearIsolation()
+        }
+
+        let toggled: Bool
+        switch source {
+        case .hid:
+            toggled = hidDetector.handle(edge, nowMs: nowMs)
+        case .atvv:
+            toggled = atvvDetector.handle(edge, nowMs: nowMs)
+        }
+        if toggled {
+            resetDetectors()
+            isolatedSource = source.opposite
+            isolationExpiresAtMs = nowMs &+ Self.mirrorIsolationMs
+        }
+        return toggled
+    }
+
+    mutating func reset() {
+        resetDetectors()
+        clearIsolation()
+    }
+
+    private mutating func resetDetectors() {
+        hidDetector.reset()
+        atvvDetector.reset()
+    }
+
+    private mutating func clearIsolation() {
+        isolatedSource = nil
+        isolationExpiresAtMs = nil
+    }
+}
+
+/// Debounces ATVV MIC_OPEN/STREAM_START/STREAM_STOP controls into one physical
+/// down/up edge pair. Some firmware sends both MIC_OPEN and STREAM_START for one
+/// press, so forwarding opcodes directly would create duplicate downs.
+struct RemoteVoiceControlEdgeTracker {
+    private enum Phase {
+        case idle
+        case down
+        case draining
+    }
+
+    private var phase: Phase = .idle
+    var isDown: Bool { phase == .down }
+
+    mutating func update(active: Bool) -> RemoteEventEdge? {
+        switch (phase, active) {
+        case (.idle, true):
+            phase = .down
+            return .down
+        case (.down, false):
+            phase = .idle
+            return .up
+        case (.draining, false):
+            // A pause cancelled this physical press. Consume its final STOP and
+            // only then admit a fresh press; never synthesize an orphan release.
+            phase = .idle
+            return nil
+        case (.idle, false), (.down, true), (.draining, true):
+            return nil
+        }
+    }
+
+    /// Cancels a press that is already active while preserving enough state to
+    /// drain a duplicate STREAM_START and its eventual STOP. A clean idle tracker
+    /// remains immediately usable so ATVV can still recognise a later restore
+    /// double-click while the bridge is paused.
+    mutating func cancelCurrentPress() {
+        if phase == .down { phase = .draining }
+    }
+
+    /// A transport/session reset starts a new generation and therefore does not
+    /// need to drain controls from the old one.
+    mutating func reset() {
+        phase = .idle
+    }
+}
+
 // MARK: - Forced voice-key release ordering
 
 /// One ordered effect a reader emits when it *force*-releases the RC003 voice key

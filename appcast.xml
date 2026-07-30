@@ -1,0 +1,32 @@
+<?xml version="1.0" standalone="yes"?><!-- sparkle-sign-warning:
+IMPORTANT: This file was signed by Sparkle. Any modifications to this file requires re-signing this file with generate_appcast or sign_update! The signed signature will be embedded at the end of this file.
+--><rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>小米遥控器桥接</title>
+        <item>
+            <title>0.4.0</title>
+            <pubDate>Thu, 30 Jul 2026 16:21:29 +0800</pubDate>
+            <sparkle:version>18</sparkle:version>
+            <sparkle:shortVersionString>0.4.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>11.0</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# Open Voice Bridge 0.4.0
+
+这是首个支持应用内更新的 macOS 正式版本。
+
+- 新增菜单栏“检查更新…”以及设置页版本、自动检查开关和手动检查按钮；
+- 默认每天最多检查一次，发现新版本后由用户确认安装，不静默安装；
+- 更新 ZIP 使用 Sparkle EdDSA 签名，并继续要求同一 Developer ID 团队签名和 Apple 公证；
+- 禁止系统画像与使用数据上报，更新失败不影响蓝牙、按键映射或音频桥接；
+- 修复设置窗口打开时反复解码遥控器图片导致的高 CPU、发热和界面卡顿；
+- 双击语音键同时使用独立的 HID 与 ATVV 手势判定，短按 HID 报告偶发丢失时仍可暂停或恢复桥接，且不会重复切换；
+- 保持 Bundle ID、Developer ID、蓝牙、权限、设备适配、按键映射和音频默认行为不变。
+
+从 0.3.9 或更早版本升级时，需要最后一次手动安装本版本。安装 0.4.0 后，后续版本即可在应用内完成更新。
+]]></description>
+            <enclosure url="https://github.com/nijez/open-voice-bridge/releases/download/v0.4.0/OpenVoiceBridge-macOS-0.4.0.zip" length="5585003" type="application/octet-stream" sparkle:edSignature="eUfWYXDsfbFTPWWurF5PfVfkeUTjHS2O3gs/559XM4XBwUUKgoCuuviBuGOSzaQkTdBLERB5IwkQr/U2p6M4AQ=="></enclosure>
+        </item>
+    </channel>
+</rss><!-- sparkle-signatures:
+edSignature: MU6cQ9EuBcyPuc5zN0oMHrk07B0O5dEdMQa1bHYta8hiThc/jIIxFnrqN+BTtKnDG03X4znizvsokESgKPs+Bg==
+length: 2166
+-->

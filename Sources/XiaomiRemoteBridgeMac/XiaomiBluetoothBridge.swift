@@ -30,6 +30,10 @@ protocol XiaomiBluetoothBridgeDelegate: AnyObject {
     func bluetoothBridge(_ bridge: XiaomiBluetoothBridge, didDetectModelNumber modelNumber: String)
     func bluetoothBridgeDidStartVoice(_ bridge: XiaomiBluetoothBridge)
     func bluetoothBridgeDidStopVoice(_ bridge: XiaomiBluetoothBridge)
+    func bluetoothBridge(
+        _ bridge: XiaomiBluetoothBridge,
+        didObserveVoiceKey edge: RemoteEventEdge
+    )
     func bluetoothBridge(_ bridge: XiaomiBluetoothBridge, didDecode samples: [Int16])
 }
 
@@ -128,6 +132,7 @@ final class XiaomiBluetoothBridge: NSObject {
     private var microphoneOpened = false
     private var sessionID: UInt8 = 0
     private var lastStopAt: Date?
+    private var voiceControlEdgeTracker = RemoteVoiceControlEdgeTracker()
     /// Runtime voice gate. When false (bridge runtime disabled) the BLE link and
     /// its state observation stay live, but the remote must not open the
     /// microphone, start/continue a stream, or push audio. Independent of the BLE
@@ -188,6 +193,11 @@ final class XiaomiBluetoothBridge: NSObject {
             AppLogger.shared.write("ATVV VOICE_GATE enabled")
             return
         }
+        // A manual bridge pause can happen after ATVV reported MIC_OPEN but
+        // before the same press reports STREAM_START/STOP. Drain that press
+        // instead of resetting to idle, or its delayed STREAM_START would look
+        // like a new tap and could arm an accidental restore.
+        voiceControlEdgeTracker.cancelCurrentPress()
         closeMicrophoneIfNeeded()
         if streaming {
             stopStreaming()
@@ -335,6 +345,12 @@ final class XiaomiBluetoothBridge: NSObject {
         accumulator.reset()
         pendingSync = nil
         decoder.reset()
+        voiceControlEdgeTracker.reset()
+    }
+
+    private func observeVoiceControl(active: Bool) {
+        guard let edge = voiceControlEdgeTracker.update(active: active) else { return }
+        delegate?.bluetoothBridge(self, didObserveVoiceKey: edge)
     }
 
     private func scheduleReconnect(discardCachedIdentity: Bool = false) {
@@ -458,6 +474,8 @@ final class XiaomiBluetoothBridge: NSObject {
             capabilitiesConfirmed = true
             completeInitializationIfPossible()
         case 0x08:
+            guard lifecycle.acceptsProtocolData(generation: generation) else { return }
+            observeVoiceControl(active: true)
             guard ATVVVoiceBridgeGate.allowsVoice(bridgingEnabled: voiceBridgingEnabled) else {
                 AppLogger.shared.write("ATVV MIC_OPEN ignored_bridging_disabled")
                 return
@@ -478,6 +496,8 @@ final class XiaomiBluetoothBridge: NSObject {
             microphoneOpened = true
             AppLogger.shared.write("ATVV MIC_OPEN request")
         case 0x04:
+            guard lifecycle.acceptsProtocolData(generation: generation) else { return }
+            observeVoiceControl(active: true)
             guard ATVVVoiceBridgeGate.allowsVoice(bridgingEnabled: voiceBridgingEnabled) else {
                 AppLogger.shared.write("ATVV STREAM_START ignored_bridging_disabled")
                 return
@@ -510,6 +530,7 @@ final class XiaomiBluetoothBridge: NSObject {
             startStreaming()
         case 0x00:
             guard lifecycle.acceptsProtocolData(generation: generation) else { return }
+            observeVoiceControl(active: false)
             stopStreaming()
         case 0x0A:
             guard lifecycle.acceptsProtocolData(generation: generation) else { return }

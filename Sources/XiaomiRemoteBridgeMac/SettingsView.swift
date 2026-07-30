@@ -1,6 +1,37 @@
 import AppKit
 import SwiftUI
 
+/// Loads each bundled remote photo once for the process lifetime. SwiftUI may
+/// evaluate a view body many times during AppKit layout; doing synchronous
+/// ImageIO work from that body can turn an otherwise idle settings window into
+/// a continuous layout/render loop.
+private enum RemoteImageCatalog {
+    private static let rc003Pro = load(.rc003Pro)
+    private static let arn9 = load(.arn9)
+
+    static func image(for variant: XiaomiRemoteVariant) -> NSImage? {
+        switch variant {
+        case .rc003Pro: return rc003Pro
+        case .arn9: return arn9
+        }
+    }
+
+    /// Forces the two tiny bundled images to decode before SwiftUI evaluates a
+    /// view body. This keeps even the one-time ImageIO cost out of layout.
+    static func prewarm() {
+        _ = rc003Pro
+        _ = arn9
+    }
+
+    private static func load(_ variant: XiaomiRemoteVariant) -> NSImage? {
+        guard let url = Bundle.main.url(
+            forResource: variant.imageResourceName,
+            withExtension: "png"
+        ) else { return nil }
+        return NSImage(contentsOf: url)
+    }
+}
+
 private enum DeviceWorkspaceSelection: String, CaseIterable, Identifiable {
     case xiaomiRC003Pro
     case xiaomiARN9
@@ -21,6 +52,7 @@ struct SettingsView: View {
     @ObservedObject var model: BridgeAppModel
     @ObservedObject var settings: AppSettings
     @ObservedObject var launchAtLogin: LaunchAtLoginManager
+    @ObservedObject var updateController: AppUpdateController
     @State private var selectedRemoteButton: RemoteButton = .ok
     @State private var recordingRemoteButton: RemoteButton?
     @State private var bridgeHelpPresented = false
@@ -33,10 +65,12 @@ struct SettingsView: View {
     // layout → state update → layout feedback path in AppKit.
     private static let bottomSettingsCardCollapsedMinHeight: CGFloat = 176
 
-    init(model: BridgeAppModel) {
+    init(model: BridgeAppModel, updateController: AppUpdateController) {
+        RemoteImageCatalog.prewarm()
         self.model = model
         settings = model.settings
         launchAtLogin = model.launchAtLoginManager
+        self.updateController = updateController
     }
 
     var body: some View {
@@ -119,11 +153,7 @@ struct SettingsView: View {
     @ViewBuilder
     private var deviceVisual: some View {
         if settings.selectedDeviceProfile == .xiaomiRC003,
-           let url = Bundle.main.url(
-               forResource: settings.xiaomiRemoteVariant.imageResourceName,
-               withExtension: "png"
-           ),
-           let thumbnail = NSImage(contentsOf: url)
+           let thumbnail = RemoteImageCatalog.image(for: settings.xiaomiRemoteVariant)
         {
             Image(nsImage: thumbnail)
                 .resizable()
@@ -356,6 +386,19 @@ struct SettingsView: View {
                 }
             }
             Text("关闭只影响下次登录，不会退出当前应用。")
+                .font(.footnote)
+                .foregroundColor(.secondary)
+            Divider()
+            statusRow("当前版本", value: updateController.currentVersionText)
+            Toggle("自动检查更新", isOn: Binding(
+                get: { updateController.automaticallyChecksForUpdates },
+                set: { updateController.setAutomaticallyChecksForUpdates($0) }
+            ))
+            Button("检查更新…") {
+                updateController.checkForUpdates()
+            }
+            .disabled(!updateController.canCheckForUpdates)
+            Text("每天最多检查一次。发现新版本后由你确认安装，不会静默更新，也不发送系统画像或使用数据。")
                 .font(.footnote)
                 .foregroundColor(.secondary)
         }
@@ -1163,10 +1206,7 @@ private struct RemoteControlDiagram: View {
         VStack(spacing: 6) {
             GeometryReader { geometry in
                 ZStack {
-                    if let url = Bundle.main.url(
-                        forResource: variant.imageResourceName,
-                        withExtension: "png"
-                    ), let photo = NSImage(contentsOf: url) {
+                    if let photo = RemoteImageCatalog.image(for: variant) {
                         Image(nsImage: photo)
                             .resizable()
                             .aspectRatio(contentMode: .fit)

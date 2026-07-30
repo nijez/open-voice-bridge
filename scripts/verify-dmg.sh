@@ -109,6 +109,17 @@ if ! rg -q '^Signature=adhoc$|^Authority=' <<<"$APP_SIGNATURE_DETAILS"; then
   exit 1
 fi
 
+DIST_APP="$OUTPUT_DIR/$DISPLAY_NAME.app"
+if [[ "$REQUIRE_DEVELOPER_ID" -eq 1 ]] && [[ -d "$DIST_APP" ]]; then
+  DIST_CDHASH="$(codesign -dv --verbose=4 "$DIST_APP" 2>&1 | sed -n 's/^CDHash=//p' | head -n 1)"
+  DMG_APP_CDHASH="$(codesign -dv --verbose=4 "$APP" 2>&1 | sed -n 's/^CDHash=//p' | head -n 1)"
+  test -n "$DIST_CDHASH"
+  if [[ "$DMG_APP_CDHASH" != "$DIST_CDHASH" ]]; then
+    print -u2 "DMG app CDHash differs from the reviewed dist app"
+    exit 1
+  fi
+fi
+
 if [[ "$REQUIRE_NOTARIZED" -eq 1 ]]; then
   xcrun stapler validate "$DMG"
   GATEKEEPER_RESULT="$(spctl -a -vvv -t open --context context:primary-signature "$DMG" 2>&1)"
@@ -135,12 +146,15 @@ for required in \
   "$SOURCE_ROOT/Tests/SelfTest/main.swift" \
   "$SOURCE_ROOT/scripts/build-dmg.sh" \
   "$SOURCE_ROOT/Resources/XiaomiRemoteBridgeMac.entitlements" \
+  "$SOURCE_ROOT/Resources/Sparkle-LICENSE.txt" \
   "$SOURCE_ROOT/Resources/RC003-remote-photo.png" \
+  "$SOURCE_ROOT/Vendor/Sparkle.xcframework/Info.plist" \
   "$SOURCE_ROOT/device-profiles/xiaomi-rc003.json" \
   "$SOURCE_ROOT/device-profiles/dji-mic-2.json" \
   "$SOURCE_ROOT/specs/device-profile.schema.json" \
   "$SOURCE_ROOT/docs/ARCHITECTURE.md" \
   "$SOURCE_ROOT/docs/ADDING_A_DEVICE.md" \
+  "$SOURCE_ROOT/release-notes/v$VERSION.md" \
   "$SOURCE_ROOT/LICENSE"; do
   rg -qx "$required" "$ZIP_LIST"
 done
@@ -151,12 +165,33 @@ if rg -q '(^|/)(\.build|dist|logs?|\.DS_Store)(/|$)|(^|/)__MACOSX(/|$)' "$ZIP_LI
 fi
 
 unzip -qq "$SOURCE_ZIP" -d "$SOURCE_EXTRACT"
+if [[ "$REQUIRE_DEVELOPER_ID" -eq 1 ]]; then
+  SOURCE_SPARKLE_FRAMEWORK="$SOURCE_EXTRACT/$SOURCE_ROOT/Vendor/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
+  SOURCE_SPARKLE_VERSION_DIR="$SOURCE_SPARKLE_FRAMEWORK/Versions/B"
+  for component in \
+    "$SOURCE_SPARKLE_VERSION_DIR/XPCServices/Installer.xpc" \
+    "$SOURCE_SPARKLE_VERSION_DIR/XPCServices/Downloader.xpc" \
+    "$SOURCE_SPARKLE_VERSION_DIR/Autoupdate" \
+    "$SOURCE_SPARKLE_VERSION_DIR/Updater.app" \
+    "$SOURCE_SPARKLE_FRAMEWORK"; do
+    codesign --verify --strict "$component"
+    COMPONENT_DETAILS="$(codesign -dv --verbose=4 "$component" 2>&1)"
+    if ! rg -q '^Authority=Developer ID Application:' <<<"$COMPONENT_DETAILS" || \
+       ! rg -q '^Timestamp=' <<<"$COMPONENT_DETAILS" || \
+       ! rg -q '^CodeDirectory .*flags=.*\(runtime\)' <<<"$COMPONENT_DETAILS" || \
+       [[ "$(print -r -- "$COMPONENT_DETAILS" | sed -n 's/^TeamIdentifier=//p' | head -n 1)" != "$EXPECTED_RELEASE_TEAM_ID" ]]; then
+      print -u2 "source archive Sparkle component is not release-signed: $component"
+      exit 1
+    fi
+  done
+fi
 if rg -a -q '/Users/[^/[:space:]]+|/tmp/remote-bridge|AA:BB:CC:DD:EE:FF' \
   "$SOURCE_EXTRACT/$SOURCE_ROOT/Sources" \
   "$SOURCE_EXTRACT/$SOURCE_ROOT/Tests" \
   "$SOURCE_EXTRACT/$SOURCE_ROOT/Resources" \
   "$SOURCE_EXTRACT/$SOURCE_ROOT/device-profiles" \
   "$SOURCE_EXTRACT/$SOURCE_ROOT/specs" \
+  "$SOURCE_EXTRACT/$SOURCE_ROOT/release-notes" \
   "$SOURCE_EXTRACT/$SOURCE_ROOT/docs" \
   "$SOURCE_EXTRACT/$SOURCE_ROOT/Package.swift" \
   "$SOURCE_EXTRACT/$SOURCE_ROOT/README.md" \

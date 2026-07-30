@@ -1,5 +1,15 @@
 # Third-party notices
 
+## Sparkle 2
+
+- Project: Sparkle
+- Source: <https://github.com/sparkle-project/Sparkle>
+- Bundled version: `2.9.2` (`6276ba2b404829d139c45ff98427cf90e2efc59b`)
+- Upstream package SHA-256: `b83e37436774556ed055e0244b297ef2c790e0737393bf65bf495fcbba6eed65`
+- License: permissive Sparkle license; the complete text is bundled as `Resources/Sparkle-LICENSE.txt`
+
+The macOS application embeds the official universal Sparkle framework so signed and notarized releases can check the public project appcast and offer user-confirmed upgrades. The release process re-signs Sparkle's nested helpers with the same Developer ID team as the host application. Automatic installation is disabled, system profiling is disabled, and the Sparkle private EdDSA key remains in the maintainer's login Keychain; only the public verification key is committed.
+
 ## remote-bridge-hub
 
 - Project: `xxb26553663-star/remote-bridge-hub`

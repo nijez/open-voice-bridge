@@ -3,8 +3,12 @@ set -euo pipefail
 
 ROOT="${0:A:h:h}"
 OUTPUT="$ROOT/.build/self-test/XiaomiRemoteBridgeMacSelfTest"
+SPARKLE_FRAMEWORK="$ROOT/Vendor/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
 
 mkdir -p "${OUTPUT:h}"
+test "$(plutil -extract CFBundleShortVersionString raw -o - "$SPARKLE_FRAMEWORK/Versions/B/Resources/Info.plist")" = "2.9.2"
+codesign --verify --deep --strict "$SPARKLE_FRAMEWORK"
+print "PASS vendored Sparkle framework is the reviewed 2.9.2 bundle and its upstream code seal is intact"
 xcrun swiftc \
   "$ROOT/Sources/XiaomiRemoteBridgeMac/ATVVProtocol.swift" \
   "$ROOT/Sources/XiaomiRemoteBridgeMac/VoiceBridgeDeviceProfile.swift" \
@@ -20,6 +24,7 @@ xcrun swiftc \
   "$ROOT/Sources/XiaomiRemoteBridgeMac/RemoteVoiceFunctionMapper.swift" \
   "$ROOT/Sources/XiaomiRemoteBridgeMac/AppLogger.swift" \
   "$ROOT/Sources/XiaomiRemoteBridgeMac/TestTone.swift" \
+  "$ROOT/Sources/XiaomiRemoteBridgeMac/UpdatePolicy.swift" \
   "$ROOT/Sources/XiaomiRemoteBridgeMac/AudioPathDiagnostics.swift" \
   "$ROOT/Tests/SelfTest/main.swift" \
   -o "$OUTPUT"
@@ -33,6 +38,22 @@ if rg -q 'bottomSettingsCardHeight|BottomSettingsCardHeightKey|reportBottomCardH
   exit 1
 fi
 print "PASS SettingsView bottom-card layout is state-feedback free"
+
+if [ "$(rg -c 'NSImage\(contentsOf:' "$ROOT/Sources/XiaomiRemoteBridgeMac/SettingsView.swift")" -ne 1 ]; then
+  print -u2 "FAIL SettingsView must load bundled remote images only in RemoteImageCatalog"
+  exit 1
+fi
+if ! rg -Fq 'RemoteImageCatalog.image(for:' \
+  "$ROOT/Sources/XiaomiRemoteBridgeMac/SettingsView.swift"; then
+  print -u2 "FAIL SettingsView does not use the process-lifetime remote image cache"
+  exit 1
+fi
+if ! rg -Fq 'RemoteImageCatalog.prewarm()' \
+  "$ROOT/Sources/XiaomiRemoteBridgeMac/SettingsView.swift"; then
+  print -u2 "FAIL SettingsView does not prewarm the remote image cache before body evaluation"
+  exit 1
+fi
+print "PASS SettingsView performs no synchronous remote-image decoding from view bodies"
 
 SETTINGS_SOURCE="$ROOT/Sources/XiaomiRemoteBridgeMac/SettingsView.swift"
 if rg -Fq '启用 (settings.xiaomiRemoteVariant.shortName)' "$SETTINGS_SOURCE"; then
@@ -71,6 +92,26 @@ if ! rg -q 'func windowWillClose' "$APP_SOURCE" || \
   exit 1
 fi
 print "PASS Settings window has one-way sizing and releases its hidden SwiftUI tree"
+
+INFO_PLIST="$ROOT/Resources/Info.plist"
+test "$(plutil -extract SUFeedURL raw -o - "$INFO_PLIST")" = \
+  "https://raw.githubusercontent.com/nijez/open-voice-bridge/main/appcast.xml"
+test "$(plutil -extract SUPublicEDKey raw -o - "$INFO_PLIST")" = \
+  "gtTlOWJuW/zsBtP27uWp48WdHtdztj33zVGNdvJo40I="
+test "$(plutil -extract SUEnableAutomaticChecks raw -o - "$INFO_PLIST")" = "true"
+test "$(plutil -extract SUScheduledCheckInterval raw -o - "$INFO_PLIST")" = "86400"
+test "$(plutil -extract SUAllowsAutomaticUpdates raw -o - "$INFO_PLIST")" = "false"
+test "$(plutil -extract SUEnableSystemProfiling raw -o - "$INFO_PLIST")" = "false"
+test "$(plutil -extract SURequireSignedFeed raw -o - "$INFO_PLIST")" = "true"
+test "$(plutil -extract SUVerifyUpdateBeforeExtraction raw -o - "$INFO_PLIST")" = "true"
+rg -Fq 'DOWNLOAD_PREFIX="https://github.com/nijez/open-voice-bridge/releases/download/v$VERSION/"' \
+  "$ROOT/scripts/notarize-update-app.sh"
+rg -Fq 'RELEASE_NOTES="$ROOT/release-notes/v$VERSION.md"' \
+  "$ROOT/scripts/notarize-update-app.sh"
+test -f "$ROOT/release-notes/v$(plutil -extract CFBundleShortVersionString raw -o - "$INFO_PLIST").md"
+rg -Fq 'shasum -a 256 "$UPDATE_BASENAME" > "$UPDATE_BASENAME.sha256"' \
+  "$ROOT/scripts/notarize-update-app.sh"
+print "PASS Sparkle feed, EdDSA key, signed-feed/pre-extraction verification, daily schedule, no-silent-install, and no-profiling policy are pinned"
 
 if rg -q '1\.0 / 25\.0|A 25 Hz UI snapshot' \
   "$ROOT/Sources/XiaomiRemoteBridgeMac/BridgeAppModel.swift"; then
