@@ -1,3 +1,5 @@
+import AppKit
+import CoreGraphics
 import Foundation
 
 private var passed = 0
@@ -1034,6 +1036,34 @@ do {
     check(false, "v2 custom bindings persist and merge with defaults: \(error)")
 }
 
+do {
+    let suiteName = "XiaomiRemoteBridgeMacSelfTest.multiAction.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suiteName)!
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    let shortcut = KeyChord(keyCode: 8, keyLabel: "C", modifiers: [.control])
+    let settings = AppSettings(defaults: defaults)
+    settings.setBinding(.shortcut(shortcut), for: .back, slot: .doublePress)
+    settings.setBinding(.preset(.escape), for: .back, slot: .longPress)
+    settings.setMultiActionTiming(doubleClickMs: 420, longPressMs: 680)
+
+    let reloaded = AppSettings(defaults: defaults)
+    check(
+        reloaded.binding(for: .back) == .preset(.deleteBackward) &&
+            reloaded.binding(for: .back, slot: .doublePress) == .shortcut(shortcut) &&
+            reloaded.binding(for: .back, slot: .longPress) == .preset(.escape) &&
+            reloaded.multiActionDoubleClickMs == 420 &&
+            reloaded.multiActionLongPressMs == 680,
+        "multi-action settings persist extra bindings and global timing without changing single"
+    )
+    reloaded.resetBindings()
+    check(
+        reloaded.binding(for: .back) == .preset(.deleteBackward) &&
+            reloaded.binding(for: .back, slot: .doublePress) == nil &&
+            reloaded.binding(for: .back, slot: .longPress) == nil,
+        "multi-action restore-default keeps the default single and clears extra actions"
+    )
+}
+
 // Legacy JSON with the unchanged contextMenu/appSwitcher raw values still decodes.
 if let legacyDecoded = try? JSONDecoder().decode(
     [String: ButtonAction].self,
@@ -1809,6 +1839,380 @@ check(
     "standalone health + F5 tracker: a runtime revoke fails closed, balances the held key with one .up, and drops the post-revoke report"
 )
 
+// MARK: - Multi-action buttons
+
+final class FakeMultiActionRuntimeScheduler {
+    private struct Scheduled {
+        let deadlineMs: UInt64
+        var cancelled: Bool
+        let action: () -> Void
+    }
+
+    private var nextID = 0
+    private var scheduled: [Int: Scheduled] = [:]
+    private(set) var nowMs: UInt64 = 0
+
+    var scheduler: MultiActionRuntimeScheduler {
+        MultiActionRuntimeScheduler(
+            nowMs: { [weak self] in self?.nowMs ?? 0 },
+            schedule: { [weak self] delayMs, action in
+                guard let self else { return MultiActionScheduledTask {} }
+                let id = nextID
+                nextID += 1
+                scheduled[id] = Scheduled(
+                    deadlineMs: nowMs + delayMs,
+                    cancelled: false,
+                    action: action
+                )
+                return MultiActionScheduledTask { [weak self] in
+                    guard let self, var task = scheduled[id] else { return }
+                    task.cancelled = true
+                    scheduled[id] = task
+                }
+            }
+        )
+    }
+
+    func advance(to targetMs: UInt64) {
+        while let next = scheduled
+            .filter({ !$0.value.cancelled && $0.value.deadlineMs <= targetMs })
+            .min(by: {
+                ($0.value.deadlineMs, $0.key) < ($1.value.deadlineMs, $1.key)
+            }) {
+            guard let task = scheduled.removeValue(forKey: next.key) else { continue }
+            nowMs = task.deadlineMs
+            task.action()
+        }
+        nowMs = targetMs
+    }
+}
+
+private func makeCoordinator(
+    scheduler: FakeMultiActionRuntimeScheduler,
+    activeUsages: @escaping () -> Set<UInt16>,
+    recorded: @escaping (MultiActionRuntimeContext, [MultiActionGestureOutput]) -> Void,
+    failureCount: @escaping () -> Void
+) -> MultiActionRuntimeCoordinator {
+    MultiActionRuntimeCoordinator(
+        scheduler: scheduler.scheduler,
+        isUsageActive: { activeUsages().contains($0) },
+        deliverOutputs: { context, outputs in
+            if !outputs.isEmpty { recorded(context, outputs) }
+            return true
+        },
+        deliveryDidFail: failureCount
+    )
+}
+
+let multiActionConfiguration = MultiActionGestureConfiguration(
+    hasDoublePress: true,
+    hasLongPress: true,
+    doubleClickMs: 350,
+    longPressMs: 500
+)
+
+var multiActionSingle = MultiActionButtonGesture(configuration: multiActionConfiguration)
+_ = multiActionSingle.handle(.down, nowMs: 0)
+_ = multiActionSingle.handle(.up, nowMs: 80)
+check(
+    multiActionSingle.nextDeadlineMs == 350 &&
+        multiActionSingle.handleDeadline(nowMs: 350) == [.performSingle(count: 1)],
+    "multi-action: a lone tap resolves to single only when the double window expires"
+)
+
+var multiActionDouble = MultiActionButtonGesture(configuration: multiActionConfiguration)
+_ = multiActionDouble.handle(.down, nowMs: 0)
+_ = multiActionDouble.handle(.up, nowMs: 80)
+_ = multiActionDouble.handle(.down, nowMs: 200)
+check(
+    multiActionDouble.handle(.up, nowMs: 280) == [.performDouble],
+    "multi-action: two short taps resolve to only the double action"
+)
+
+var multiActionLong = MultiActionButtonGesture(configuration: multiActionConfiguration)
+_ = multiActionLong.handle(.down, nowMs: 0)
+let multiActionLongEffect = multiActionLong.handleDeadline(nowMs: 500)
+check(
+    multiActionLongEffect == [.beginLongHold] &&
+        multiActionLong.handle(.up, nowMs: 700) == [.endHold],
+    "multi-action: crossing the hold threshold begins long and release balances the hold"
+)
+
+var multiActionTapHold = MultiActionButtonGesture(configuration: multiActionConfiguration)
+_ = multiActionTapHold.handle(.down, nowMs: 0)
+_ = multiActionTapHold.handle(.up, nowMs: 80)
+_ = multiActionTapHold.handle(.down, nowMs: 200)
+check(
+    multiActionTapHold.handleDeadline(nowMs: 700) == [.beginSingleHold(precedingTapCount: 1)] &&
+        multiActionTapHold.handle(.up, nowMs: 900) == [.endHold],
+    "multi-action: tap then hold restores the single action and balances the held key on release"
+)
+
+var multiActionInterrupted = MultiActionButtonGesture(configuration: multiActionConfiguration)
+_ = multiActionInterrupted.handle(.down, nowMs: 0)
+_ = multiActionInterrupted.handle(.up, nowMs: 60)
+check(
+    multiActionInterrupted.interrupt() == [.performSingle(count: 1)] &&
+        multiActionInterrupted.isFinished,
+    "multi-action: another button resolves a pending single before the interrupter"
+)
+
+let normalizedMultiActionTiming = MultiActionTiming.normalized(
+    doubleClickMs: 600,
+    longPressMs: 400
+)
+check(
+    normalizedMultiActionTiming.doubleClickMs == 600 &&
+        normalizedMultiActionTiming.longPressMs == 650,
+    "multi-action: timing normalization clamps values and preserves the long-after-double gap"
+)
+
+let shortDoubleConfiguration = MultiActionGestureConfiguration(
+    hasDoublePress: true,
+    hasLongPress: false,
+    doubleClickMs: 220,
+    longPressMs: 900
+)
+var configuredDoubleSingle = MultiActionButtonGesture(configuration: shortDoubleConfiguration)
+_ = configuredDoubleSingle.handle(.down, nowMs: 1_000)
+_ = configuredDoubleSingle.handle(.up, nowMs: 1_080)
+let configuredDoubleBeforeBoundary = configuredDoubleSingle.handleDeadline(nowMs: 1_219)
+let configuredDoubleAtBoundary = configuredDoubleSingle.handleDeadline(nowMs: 1_220)
+
+var configuredDoubleTooLate = MultiActionButtonGesture(configuration: shortDoubleConfiguration)
+_ = configuredDoubleTooLate.handle(.down, nowMs: 1_000)
+_ = configuredDoubleTooLate.handle(.up, nowMs: 1_080)
+let configuredDoubleLateSecondDown = configuredDoubleTooLate.handle(.down, nowMs: 1_221)
+check(
+    configuredDoubleBeforeBoundary.isEmpty &&
+        configuredDoubleAtBoundary == [.performSingle(count: 1)] &&
+        configuredDoubleLateSecondDown == [.performSingle(count: 1)],
+    "multi-action: configured double-click interval changes the decision boundary"
+)
+
+let slowLongConfiguration = MultiActionGestureConfiguration(
+    hasDoublePress: false,
+    hasLongPress: true,
+    doubleClickMs: 350,
+    longPressMs: 900
+)
+var configuredLong = MultiActionButtonGesture(configuration: slowLongConfiguration)
+_ = configuredLong.handle(.down, nowMs: 100)
+let configuredLongBeforeBoundary = configuredLong.handleDeadline(nowMs: 999)
+let configuredLongAtBoundary = configuredLong.handleDeadline(nowMs: 1_000)
+check(
+    configuredLongBeforeBoundary.isEmpty &&
+        configuredLongAtBoundary == [.beginLongHold],
+    "multi-action: configured long-press duration changes the hold threshold"
+)
+
+do {
+    let scheduler = FakeMultiActionRuntimeScheduler()
+    var activeUsages = Set<UInt16>()
+    var outputs: [MultiActionGestureOutput] = []
+    var failureCount = 0
+    let coordinator = makeCoordinator(
+        scheduler: scheduler,
+        activeUsages: { activeUsages },
+        recorded: { _, emitted in outputs.append(contentsOf: emitted) },
+        failureCount: { failureCount += 1 }
+    )
+    let binding = MultiActionButtonBinding(
+        single: .preset(.arrowUp),
+        doublePress: .preset(.showDesktop),
+        longPress: .preset(.arrowDown)
+    )
+    activeUsages.insert(RemoteButton.up.hidUsage)
+    _ = coordinator.handle(
+        .down,
+        usage: RemoteButton.up.hidUsage,
+        button: .up,
+        binding: binding,
+        configuration: multiActionConfiguration
+    )
+    scheduler.advance(to: 80)
+    activeUsages.remove(RemoteButton.up.hidUsage)
+    _ = coordinator.handle(
+        .up,
+        usage: RemoteButton.up.hidUsage,
+        button: .up,
+        binding: binding,
+        configuration: multiActionConfiguration
+    )
+    scheduler.advance(to: 349)
+    let beforeDeadline = outputs
+    scheduler.advance(to: 350)
+    check(
+        beforeDeadline.isEmpty && outputs == [.performSingle(count: 1)] && failureCount == 0,
+        "multi-action coordinator: deadline dispatches the pending single exactly once"
+    )
+}
+
+do {
+    let scheduler = FakeMultiActionRuntimeScheduler()
+    var activeUsages = Set<UInt16>()
+    var outputs: [MultiActionGestureOutput] = []
+    let usage = RemoteButton.down.hidUsage
+    let coordinator = makeCoordinator(
+        scheduler: scheduler,
+        activeUsages: { activeUsages },
+        recorded: { _, emitted in outputs.append(contentsOf: emitted) },
+        failureCount: {}
+    )
+    let binding = MultiActionButtonBinding(
+        single: .preset(.arrowDown),
+        longPress: .preset(.showDesktop)
+    )
+    let configuration = MultiActionGestureConfiguration(
+        hasDoublePress: false,
+        hasLongPress: true,
+        doubleClickMs: 350,
+        longPressMs: 500
+    )
+    activeUsages.insert(usage)
+    _ = coordinator.handle(
+        .down,
+        usage: usage,
+        button: .down,
+        binding: binding,
+        configuration: configuration
+    )
+    scheduler.advance(to: 500)
+    activeUsages.remove(usage)
+    coordinator.deferHeldRelease(for: usage)
+    scheduler.advance(to: 619)
+    activeUsages.insert(usage)
+    let merged = coordinator.resumeDeferredHold(for: usage)
+    scheduler.advance(to: 700)
+    let afterMergedRound = outputs
+    activeUsages.remove(usage)
+    coordinator.deferHeldRelease(for: usage)
+    scheduler.advance(to: 820)
+    check(
+        merged &&
+            afterMergedRound == [.beginLongHold] &&
+            outputs == [.beginLongHold, .endHold],
+        "multi-action coordinator: 120 ms firmware-repeat grace merges then releases the hold"
+    )
+}
+
+do {
+    let scheduler = FakeMultiActionRuntimeScheduler()
+    var activeUsages = Set<UInt16>()
+    var outputs: [MultiActionGestureOutput] = []
+    let usage = RemoteButton.left.hidUsage
+    let coordinator = makeCoordinator(
+        scheduler: scheduler,
+        activeUsages: { activeUsages },
+        recorded: { _, emitted in outputs.append(contentsOf: emitted) },
+        failureCount: {}
+    )
+    let binding = MultiActionButtonBinding(
+        single: .preset(.arrowLeft),
+        longPress: .preset(.showDesktop)
+    )
+    let configuration = MultiActionGestureConfiguration(
+        hasDoublePress: false,
+        hasLongPress: true,
+        doubleClickMs: 200,
+        longPressMs: 300
+    )
+    activeUsages.insert(usage)
+    _ = coordinator.handle(
+        .down,
+        usage: usage,
+        button: .left,
+        binding: binding,
+        configuration: configuration
+    )
+    scheduler.advance(to: 300)
+    activeUsages.remove(usage)
+    coordinator.deferHeldRelease(for: usage)
+    let resets = coordinator.reset()
+    scheduler.advance(to: 2_000)
+    check(
+        resets == [
+            MultiActionRuntimeResetContext(
+                usage: usage,
+                button: .left,
+                wasHoldingOutput: true
+            ),
+        ] &&
+            outputs == [.beginLongHold] &&
+            !coordinator.hasRuntime(for: usage),
+        "multi-action coordinator: reset reports held cleanup and cancels stale callbacks"
+    )
+}
+
+do {
+    let scheduler = FakeMultiActionRuntimeScheduler()
+    var outputs: [MultiActionGestureOutput] = []
+    let usage = RemoteButton.right.hidUsage
+    let coordinator = makeCoordinator(
+        scheduler: scheduler,
+        activeUsages: { [] },
+        recorded: { _, emitted in outputs.append(contentsOf: emitted) },
+        failureCount: {}
+    )
+    let binding = MultiActionButtonBinding(
+        single: .preset(.arrowRight),
+        doublePress: .preset(.showDesktop)
+    )
+    let shortWindow = MultiActionGestureConfiguration(
+        hasDoublePress: true,
+        hasLongPress: false,
+        doubleClickMs: 220,
+        longPressMs: 900
+    )
+    let longWindow = MultiActionGestureConfiguration(
+        hasDoublePress: true,
+        hasLongPress: false,
+        doubleClickMs: 600,
+        longPressMs: 900
+    )
+    _ = coordinator.handle(
+        .down,
+        usage: usage,
+        button: .right,
+        binding: binding,
+        configuration: shortWindow
+    )
+    scheduler.advance(to: 80)
+    _ = coordinator.handle(
+        .up,
+        usage: usage,
+        button: .right,
+        binding: binding,
+        configuration: longWindow
+    )
+    scheduler.advance(to: 220)
+    let firstGestureOutputs = outputs
+    _ = coordinator.handle(
+        .down,
+        usage: usage,
+        button: .right,
+        binding: binding,
+        configuration: longWindow
+    )
+    scheduler.advance(to: 300)
+    _ = coordinator.handle(
+        .up,
+        usage: usage,
+        button: .right,
+        binding: binding,
+        configuration: longWindow
+    )
+    scheduler.advance(to: 819)
+    let beforeNewDeadline = outputs
+    scheduler.advance(to: 820)
+    check(
+        firstGestureOutputs == [.performSingle(count: 1)] &&
+            beforeNewDeadline == firstGestureOutputs &&
+            outputs == [.performSingle(count: 1), .performSingle(count: 1)],
+        "multi-action coordinator: timing changes apply from the next gesture snapshot"
+    )
+}
+
 // MARK: - RC003 voice-key double-click bridge toggle (XRBM-017)
 
 // Two complete short taps whose downs fall within the window toggle exactly once,
@@ -2126,6 +2530,153 @@ check(
         !ExternalMicrophoneProfile.isDJIMic2(displayName: "Built-in Microphone"),
     "DJI Mic 2 identity: rejects lookalikes and unrelated microphones"
 )
+
+// MARK: - Shared preset delivery contract (no input is posted)
+
+check(
+    ButtonAction.allCases.filter { KeyboardInjector.presetKeyBinding(for: $0) == nil } ==
+        [.disabled, .mouseRightClick],
+    "preset delivery: only disabled and momentary mouse actions bypass key delivery"
+)
+check(
+    KeyboardInjector.presetKeyBinding(for: .showDesktop) == .key(keyCode: 103, modifiers: [.function]) &&
+        KeyboardInjector.presetKeyBinding(for: .contextMenu) == .key(keyCode: 109, modifiers: [.shift]) &&
+        KeyboardInjector.presetKeyBinding(for: .appSwitcher) == .key(keyCode: 48, modifiers: [.command]),
+    "preset delivery: desktop, context menu, and app switcher retain their modifier chords"
+)
+check(
+    KeyboardInjector.presetKeyBinding(for: .volumeUp)?.supportsRepeat == true &&
+        KeyboardInjector.presetKeyBinding(for: .volumeDown)?.supportsRepeat == true &&
+        KeyboardInjector.presetKeyBinding(for: .volumeMute)?.supportsRepeat == false &&
+        KeyboardInjector.presetKeyBinding(for: .playPause)?.supportsRepeat == false,
+    "preset delivery: holding volume repeats while holding mute or play/pause does not toggle repeatedly"
+)
+
+runRemoteButtonNativeMappingTests { check($0, $1) }
+runApplicationLauncherTests { check($0, $1) }
+runGestureTimingTextFieldTests { check($0, $1) }
+runButtonSettingsTests { check($0, $1) }
+runGestureReviewRegressionTests { check($0, $1) }
+
+check(
+    MultiActionTimingInput.digits(in: "a3中5.0!") == "350" &&
+        MultiActionTimingInput.digits(in: "abc中文") == "",
+    "timing input: typing or pasting retains only ASCII digits"
+)
+check(
+    MultiActionTimingInput.committedValue(from: "9", fallback: 350, range: 200...600) == 200 &&
+        MultiActionTimingInput.committedValue(from: "9999", fallback: 350, range: 200...600) == 600,
+    "timing input: committing an out-of-range double interval clamps to the nearest boundary"
+)
+check(
+    MultiActionTimingInput.committedValue(from: "1", fallback: 500, range: 300...1500) == 300 &&
+        MultiActionTimingInput.committedValue(from: "9999", fallback: 500, range: 300...1500) == 1500,
+    "timing input: committing an out-of-range long interval clamps to the nearest boundary"
+)
+check(
+    MultiActionTimingInput.committedValue(from: "", fallback: 420, range: 200...600) == 420 &&
+        MultiActionTimingInput.committedValue(from: "000350", fallback: 420, range: 200...600) == 350 &&
+        MultiActionTimingInput.committedValue(from: String(repeating: "9", count: 100), fallback: 420, range: 200...600) == 600,
+    "timing input: empty edits restore the saved value; leading zeros and integer overflow normalize safely"
+)
+
+let ordinaryButtonConfiguration = MultiActionGestureConfiguration(
+    hasDoublePress: false, hasLongPress: false, doubleClickMs: 350, longPressMs: 500
+)
+
+// Ordinary buttons use the same runtime and output lifecycle as gestures, but
+// execute immediately and must not merge separate rapid short taps.
+do {
+    let configuration = ordinaryButtonConfiguration
+    var gesture = MultiActionButtonGesture(configuration: configuration)
+    let down = gesture.handle(.down, nowMs: 0)
+    let duplicate = gesture.handle(.down, nowMs: 10)
+    let deadline = gesture.nextDeadlineMs
+    let up = gesture.handle(.up, nowMs: 40)
+    check(
+        down == [.beginSingleHold(precedingTapCount: 0)] && duplicate.isEmpty &&
+            deadline == nil && up == [.endHold] && gesture.isFinished,
+        "ordinary button: immediate balanced hold with no gesture delay or repeated-down click"
+    )
+}
+
+do {
+    let scheduler = FakeMultiActionRuntimeScheduler()
+    var active = Set<UInt16>()
+    var outputs: [MultiActionGestureOutput] = []
+    let coordinator = makeCoordinator(
+        scheduler: scheduler, activeUsages: { active },
+        recorded: { _, emitted in outputs += emitted }, failureCount: {}
+    )
+    let configuration = ordinaryButtonConfiguration
+    let binding = MultiActionButtonBinding(single: .preset(.deleteBackward))
+    let usage = RemoteButton.power.hidUsage
+    for start in [UInt64(0), 100, 200] {
+        scheduler.advance(to: start)
+        active.insert(usage)
+        _ = coordinator.handle(.down, usage: usage, button: .power, binding: binding, configuration: configuration)
+        scheduler.advance(to: start + 40)
+        active.remove(usage)
+        coordinator.deferHeldRelease(for: usage)
+    }
+    check(
+        outputs == Array(repeating: [MultiActionGestureOutput.beginSingleHold(precedingTapCount: 0), .endHold], count: 3).flatMap { $0 } &&
+            !coordinator.hasRuntime(for: usage),
+        "ordinary button: rapid unconfigured power-key taps remain three independent clicks"
+    )
+}
+
+do {
+    let scheduler = FakeMultiActionRuntimeScheduler()
+    var active = Set<UInt16>()
+    var outputs: [MultiActionGestureOutput] = []
+    let coordinator = makeCoordinator(
+        scheduler: scheduler, activeUsages: { active },
+        recorded: { _, emitted in outputs += emitted }, failureCount: {}
+    )
+    let configuration = ordinaryButtonConfiguration
+    let binding = MultiActionButtonBinding(single: .preset(.deleteBackward))
+    let usage = RemoteButton.menu.hidUsage
+    active.insert(usage)
+    _ = coordinator.handle(.down, usage: usage, button: .menu, binding: binding, configuration: configuration)
+    scheduler.advance(to: 400)
+    active.remove(usage)
+    coordinator.deferHeldRelease(for: usage)
+    scheduler.advance(to: 500)
+    active.insert(usage)
+    let merged = coordinator.resumeDeferredHold(for: usage)
+    scheduler.advance(to: 900)
+    active.remove(usage)
+    coordinator.deferHeldRelease(for: usage)
+    scheduler.advance(to: 1_020)
+    check(
+        merged && outputs == [.beginSingleHold(precedingTapCount: 0), .endHold] && !coordinator.hasRuntime(for: usage),
+        "ordinary button: a held menu key shares firmware-repeat grace and balances release once"
+    )
+}
+
+do {
+    let scheduler = FakeMultiActionRuntimeScheduler()
+    var active = Set<UInt16>()
+    var outputs: [MultiActionGestureOutput] = []
+    let coordinator = makeCoordinator(
+        scheduler: scheduler, activeUsages: { active },
+        recorded: { _, emitted in outputs += emitted }, failureCount: {}
+    )
+    let configuration = ordinaryButtonConfiguration
+    let binding = MultiActionButtonBinding(single: .preset(.deleteBackward))
+    for button in RemoteButton.allCases where button != .microphone {
+        active.insert(button.hidUsage)
+        _ = coordinator.handle(.down, usage: button.hidUsage, button: button, binding: binding, configuration: configuration)
+    }
+    let reset = coordinator.reset()
+    scheduler.advance(to: 5_000)
+    check(
+        reset.count == 12 && reset.allSatisfy(\.wasHoldingOutput) && outputs.count == 12 &&
+            RemoteButton.allCases.allSatisfy { !coordinator.hasRuntime(for: $0.hidUsage) },
+        "ordinary button: every non-voice key shares held-output cleanup without a whitelist"
+    )
+}
 
 print("RESULT passed=\(passed) failed=\(failed)")
 if failed > 0 {

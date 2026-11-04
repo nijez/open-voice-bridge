@@ -250,6 +250,31 @@ struct RemoteButtonsTests {
         #expect(chord.displayName == "⇧⌘P")
     }
 
+    @Test func multiActionBindingsAndTimingPersistAndReset() throws {
+        let suiteName = "XiaomiRemoteBridgeMacTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let interrupt = KeyChord(keyCode: 8, keyLabel: "C", modifiers: [.control])
+
+        let initial = AppSettings(defaults: defaults)
+        initial.setBinding(.shortcut(interrupt), for: .back, slot: .doublePress)
+        initial.setBinding(.preset(.escape), for: .back, slot: .longPress)
+        initial.setMultiActionDoubleClickMs(420)
+        initial.setMultiActionLongPressMs(680)
+
+        let reloaded = AppSettings(defaults: defaults)
+        #expect(reloaded.binding(for: .back) == .preset(.deleteBackward))
+        #expect(reloaded.binding(for: .back, slot: .doublePress) == .shortcut(interrupt))
+        #expect(reloaded.binding(for: .back, slot: .longPress) == .preset(.escape))
+        #expect(reloaded.multiActionDoubleClickMs == 420)
+        #expect(reloaded.multiActionLongPressMs == 680)
+
+        reloaded.resetBindings()
+        #expect(reloaded.binding(for: .back) == .preset(.deleteBackward))
+        #expect(reloaded.binding(for: .back, slot: .doublePress) == nil)
+        #expect(reloaded.binding(for: .back, slot: .longPress) == nil)
+    }
+
     @Test func heldCustomChordRetainsStateUntilReleaseDeliverySucceeds() {
         let chord = KeyChord(keyCode: 35, keyLabel: "P", modifiers: [.command])
         var latch = HeldKeyChordLatch()
