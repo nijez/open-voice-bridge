@@ -62,7 +62,7 @@ final class HIDRemoteMonitor {
 
     private let settings: AppSettings
     private let eventSuppressor = KeyboardEventSuppressor()
-    private let nativeMapper = RemoteButtonNativeMapper()
+    private let nativeMapper: RemoteButtonNativeMapper
     private var nativeMappingState = NativeMappingState.restored
     private var nativeMappingRetryToken: UInt64 = 0
     private var manager: IOHIDManager?
@@ -175,8 +175,12 @@ final class HIDRemoteMonitor {
         AppLogger.shared.write("HID ACTIONS suppressed")
     }
 
-    init(settings: AppSettings) {
+    init(
+        settings: AppSettings,
+        nativeMapper: RemoteButtonNativeMapper = RemoteButtonNativeMapper()
+    ) {
         self.settings = settings
+        self.nativeMapper = nativeMapper
     }
 
     static var inputMonitoringAccess: IOHIDAccessType {
@@ -411,7 +415,10 @@ final class HIDRemoteMonitor {
         guard nativeMappingAttemptIsCurrent(device: device, generation: generation, token: token) else {
             return
         }
-        switch nativeMapper.applyResult(locationID: locationID) {
+        switch nativeMapper.applyResult(
+            locationID: locationID,
+            includeHardwareVoiceMapping: shouldMapVoiceToHardwareFn
+        ) {
         case .applied:
             nativeMappingState = .applied
             reportConnected()
@@ -419,11 +426,7 @@ final class HIDRemoteMonitor {
             nativeMappingState = .restoreFailed
             failNativeMapping(generation: generation, token: token, reason: "safety_failure")
         case .serviceNotReady:
-            guard let delay = RemoteButtonNativeMappingRetryPolicy.delay(afterAttempt: attempt) else {
-                nativeMappingState = .restoreFailed
-                failNativeMapping(generation: generation, token: token, reason: "service_timeout")
-                return
-            }
+            let delay = RemoteButtonNativeMappingRetryPolicy.delay(afterAttempt: attempt)
             nativeMappingState = .pending
             updateStatus("正在等待 RC003 系统按键服务")
             AppLogger.shared.write(
@@ -439,6 +442,11 @@ final class HIDRemoteMonitor {
                 )
             }
         }
+    }
+
+    private var shouldMapVoiceToHardwareFn: Bool {
+        if case .hardwareFn = settings.binding(for: .microphone) { return true }
+        return false
     }
 
     private func nativeMappingAttemptIsCurrent(

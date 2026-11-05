@@ -138,27 +138,39 @@ enum RemoteVoiceFunctionMappingPolicy {
 }
 
 final class RemoteVoiceFunctionMapper {
-    private static let mappingProperty = "UserKeyMapping" as CFString
-
     private struct OriginalVoiceMapping {
         let mapping: HIDUsageMapping?
     }
 
+    private let services: () -> [RemoteButtonNativeMappingService]?
+    private let ownership: RemoteNativeMappingOwnership
     private var originalMappings: [UInt64: OriginalVoiceMapping] = [:]
     private(set) var isApplied = false
 
+    init(
+        services: @escaping () -> [RemoteButtonNativeMappingService]? =
+            RemoteButtonNativeMapper.liveServices(),
+        ownership: RemoteNativeMappingOwnership = RemoteNativeMappingOwnership()
+    ) {
+        self.services = services
+        self.ownership = ownership
+    }
+
     @discardableResult
     func apply() -> Bool {
-        let client = IOHIDEventSystemClientCreateSimpleClient(kCFAllocatorDefault)
-        let services = IOHIDEventSystemClientCopyServices(client) as? [IOHIDServiceClient] ?? []
+        guard let present = services() else {
+            AppLogger.shared.write("VOICE FN MAPPING applied=false enumeration_unavailable")
+            return false
+        }
         var matchedCount = 0
         var appliedCount = 0
 
-        for service in services where Self.isTarget(service) {
+        for service in present {
             matchedCount += 1
-            guard let registryID = Self.registryID(service) else { continue }
+            let registryID = service.registryID
             let current = Self.readMappings(service)
-            if originalMappings[registryID] == nil {
+            if originalMappings[registryID] == nil,
+               !ownership.ownsCombinedVoiceMapping(registryID: registryID) {
                 originalMappings[registryID] = OriginalVoiceMapping(
                     mapping: current.first {
                         $0.source == RemoteVoiceFunctionMappingPolicy.remoteVoiceKey.source
@@ -166,11 +178,7 @@ final class RemoteVoiceFunctionMapper {
                 )
             }
             let desired = RemoteVoiceFunctionMappingPolicy.applying(to: current)
-            if IOHIDServiceClientSetProperty(
-                service,
-                Self.mappingProperty,
-                desired.map(\.property) as CFArray
-            ) {
+            if service.writeAndVerify(desired) == .verified {
                 appliedCount += 1
             }
         }
@@ -188,27 +196,25 @@ final class RemoteVoiceFunctionMapper {
     /// empty, covering relaunch after a crash or force-quit.
     @discardableResult
     func prepareForCustom(requirePresentTarget: Bool = false) -> Bool {
-        let client = IOHIDEventSystemClientCreateSimpleClient(kCFAllocatorDefault)
-        let services = (IOHIDEventSystemClientCopyServices(client) as? [IOHIDServiceClient] ?? [])
-            .filter(Self.isTarget)
-        guard !requirePresentTarget || !services.isEmpty else {
+        guard let present = services() else {
+            AppLogger.shared.write("VOICE CUSTOM AUDIT rejected enumeration_unavailable")
+            return false
+        }
+        guard !requirePresentTarget || !present.isEmpty else {
             AppLogger.shared.write("VOICE CUSTOM AUDIT rejected no_target")
             return false
         }
 
         struct PendingWrite {
-            let service: IOHIDServiceClient
+            let service: RemoteButtonNativeMappingService
             let registryID: UInt64
             let desired: [HIDUsageMapping]
         }
         var plans: [CustomVoiceMappingCleanupPlan] = []
         var pendingByPlanIndex: [Int: PendingWrite] = [:]
 
-        for service in services {
-            guard let registryID = Self.registryID(service) else {
-                AppLogger.shared.write("VOICE CUSTOM AUDIT rejected missing_registry_id")
-                return false
-            }
+        for service in present {
+            let registryID = service.registryID
             let savedState: SavedVoiceMappingState
             if let original = originalMappings[registryID] {
                 savedState = original.mapping.map(SavedVoiceMappingState.present) ?? .absent
@@ -242,15 +248,7 @@ final class RemoteVoiceFunctionMapper {
             guard let pending = pendingByPlanIndex[index], pending.desired == desired else {
                 return false
             }
-            guard IOHIDServiceClientSetProperty(
-                pending.service,
-                Self.mappingProperty,
-                desired.map(\.property) as CFArray
-            ) else { return false }
-            let verified = Self.readMappings(pending.service)
-            return !verified.contains {
-                $0.source == RemoteVoiceFunctionMappingPolicy.remoteVoiceKey.source
-            }
+            return pending.service.writeAndVerify(desired) == .verified
         }
         guard succeeded else {
             AppLogger.shared.write("VOICE CUSTOM AUDIT rejected cleanup_or_verify_failed")
@@ -260,7 +258,7 @@ final class RemoteVoiceFunctionMapper {
             originalMappings.removeValue(forKey: write.registryID)
         }
         isApplied = false
-        AppLogger.shared.write("VOICE CUSTOM AUDIT safe targets=\(services.count)")
+        AppLogger.shared.write("VOICE CUSTOM AUDIT safe targets=\(present.count)")
         return true
     }
 
@@ -277,15 +275,17 @@ final class RemoteVoiceFunctionMapper {
             return true
         }
 
-        let client = IOHIDEventSystemClientCreateSimpleClient(kCFAllocatorDefault)
-        let services = IOHIDEventSystemClientCopyServices(client) as? [IOHIDServiceClient] ?? []
+        guard let present = services() else {
+            AppLogger.shared.write("VOICE FN MAPPING restore_failed enumeration_unavailable")
+            return false
+        }
         var attemptedCount = 0
         var restoredCount = 0
         var presentIDs = Set<UInt64>()
         var restoredIDs = Set<UInt64>()
 
-        for service in services where Self.isTarget(service) {
-            guard let registryID = Self.registryID(service) else { continue }
+        for service in present {
+            let registryID = service.registryID
             presentIDs.insert(registryID)
             guard let original = originalMappings[registryID] else { continue }
             attemptedCount += 1
@@ -293,11 +293,7 @@ final class RemoteVoiceFunctionMapper {
                 originalVoiceMapping: original.mapping,
                 in: Self.readMappings(service)
             )
-            if IOHIDServiceClientSetProperty(
-                service,
-                Self.mappingProperty,
-                restored.map(\.property) as CFArray
-            ) {
+            if service.writeAndVerify(restored) == .verified {
                 restoredCount += 1
                 restoredIDs.insert(registryID)
             }
@@ -317,31 +313,9 @@ final class RemoteVoiceFunctionMapper {
         return restoredCount == attemptedCount
     }
 
-    private static func isTarget(_ service: IOHIDServiceClient) -> Bool {
-        guard let hidIdentity = VoiceBridgeDeviceProfiles.xiaomiRC003.hidIdentity else {
-            return false
-        }
-        let vendor = IOHIDServiceClientCopyProperty(
-            service,
-            kIOHIDVendorIDKey as CFString
-        ) as? NSNumber
-        let product = IOHIDServiceClientCopyProperty(
-            service,
-            kIOHIDProductIDKey as CFString
-        ) as? NSNumber
-        return vendor?.intValue == hidIdentity.vendorID &&
-            product?.intValue == hidIdentity.productID
-    }
-
-    private static func registryID(_ service: IOHIDServiceClient) -> UInt64? {
-        (IOHIDServiceClientGetRegistryID(service) as? NSNumber)?.uint64Value
-    }
-
-    private static func readMappings(_ service: IOHIDServiceClient) -> [HIDUsageMapping] {
-        let properties = IOHIDServiceClientCopyProperty(
-            service,
-            mappingProperty
-        ) as? [[String: NSNumber]] ?? []
-        return properties.compactMap(HIDUsageMapping.init(property:))
+    private static func readMappings(
+        _ service: RemoteButtonNativeMappingService
+    ) -> [HIDUsageMapping] {
+        service.mappings
     }
 }

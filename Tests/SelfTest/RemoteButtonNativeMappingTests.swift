@@ -11,26 +11,11 @@ private final class NativeMappingFixture {
     var verifyWorks = true
     var writeCount = 0
     var wroteWithBackup = false
+    let ownership = RemoteNativeMappingOwnership()
 
     func mapper() -> RemoteButtonNativeMapper {
         RemoteButtonNativeMapper(
-            services: { [self] in
-                guard enumerationWorks else { return nil }
-                guard present else { return [] }
-                let service = RemoteButtonNativeMappingService(
-                    registryID: 42, locationID: 7, mappings: mappings,
-                    writeAndVerify: { [self] desired in
-                        writeCount += 1
-                        wroteWithBackup = data.flatMap {
-                            try? JSONDecoder().decode([RemoteButtonNativeMappingRecord].self, from: $0)
-                        }?.contains(where: { $0.registryID == 42 }) == true
-                        guard writeWorks else { return false }
-                        mappings = desired
-                        return verifyWorks
-                    }
-                )
-                return ambiguous ? [service, service] : [service]
-            },
+            services: { [self] in snapshots() },
             store: RemoteButtonNativeMappingStore(
                 load: { [self] in data },
                 save: { [self] updated in
@@ -39,8 +24,34 @@ private final class NativeMappingFixture {
                     return true
                 }
             ),
+            ownership: ownership,
             log: { _ in }
         )
+    }
+
+    func voiceMapper() -> RemoteVoiceFunctionMapper {
+        RemoteVoiceFunctionMapper(
+            services: { [self] in snapshots() },
+            ownership: ownership
+        )
+    }
+
+    private func snapshots() -> [RemoteButtonNativeMappingService]? {
+        guard enumerationWorks else { return nil }
+        guard present else { return [] }
+        let service = RemoteButtonNativeMappingService(
+            registryID: 42, locationID: 7, mappings: mappings,
+            writeAndVerify: { [self] desired in
+                writeCount += 1
+                wroteWithBackup = data.flatMap {
+                    try? JSONDecoder().decode([RemoteButtonNativeMappingRecord].self, from: $0)
+                }?.contains(where: { $0.registryID == 42 }) == true
+                guard writeWorks else { return .setRejected }
+                mappings = desired
+                return verifyWorks ? .verified : .readbackMismatch
+            }
+        )
+        return ambiguous ? [service, service] : [service]
     }
 
     var savedRecords: [RemoteButtonNativeMappingRecord]? {
@@ -77,6 +88,63 @@ func runRemoteButtonNativeMappingTests(_ check: (Bool, String) -> Void) {
             "native mapping: restore reinstates original power mapping and preserves a concurrent F5 edit"
         )
     }
+
+    do {
+        let fixture = NativeMappingFixture()
+        fixture.mappings = []
+        let voiceMapper = fixture.voiceMapper()
+        let buttonMapper = fixture.mapper()
+        check(
+            voiceMapper.apply() &&
+                buttonMapper.applyResult(
+                    locationID: 7,
+                    includeHardwareVoiceMapping: true
+                ) == .applied &&
+                fixture.mappings.count == RemoteButton.allCases.count,
+            "native mapping: voice and ordinary policies compose through one service channel"
+        )
+        check(
+            buttonMapper.restore() &&
+                fixture.mappings == [RemoteVoiceFunctionMappingPolicy.remoteVoiceKey],
+            "native mapping: ordinary rollback leaves the voice owner's mapping intact"
+        )
+        fixture.enumerationWorks = false
+        let unavailableRestore = voiceMapper.restore()
+        fixture.enumerationWorks = true
+        check(
+            !unavailableRestore &&
+                fixture.mappings == [RemoteVoiceFunctionMappingPolicy.remoteVoiceKey] &&
+                voiceMapper.restore() && fixture.mappings.isEmpty,
+            "native mapping: layered rollback restores the combined property in ownership order"
+        )
+    }
+
+    do {
+        let fixture = NativeMappingFixture()
+        fixture.mappings = []
+        let voiceMapper = fixture.voiceMapper()
+        let buttonMapper = fixture.mapper()
+        check(
+            buttonMapper.applyResult(
+                locationID: 7,
+                includeHardwareVoiceMapping: true
+            ) == .applied && voiceMapper.apply(),
+            "native mapping: a combined write can safely precede the later voice reconciliation"
+        )
+        check(
+            buttonMapper.restore() && fixture.mappings.isEmpty &&
+                voiceMapper.restore() && fixture.mappings.isEmpty,
+            "native mapping: voice reconciliation never adopts the combined owner's F5 as user state"
+        )
+    }
+
+    check(
+        (try? JSONDecoder().decode(
+            [RemoteButtonNativeMappingRecord].self,
+            from: Data("[{\"registryID\":42,\"originals\":[]}]".utf8)
+        ))?.first?.includesHardwareVoiceMapping == false,
+        "native mapping: the extended rollback ledger decodes the legacy schema safely"
+    )
 
     do {
         let fixture = NativeMappingFixture()
@@ -175,9 +243,39 @@ func runRemoteButtonNativeMappingTests(_ check: (Bool, String) -> Void) {
     check(
         RemoteButtonNativeMappingRetryPolicy.delay(afterAttempt: 0) == 0.05 &&
             RemoteButtonNativeMappingRetryPolicy.delay(afterAttempt: 4) == 1.2 &&
-            RemoteButtonNativeMappingRetryPolicy.delay(afterAttempt: 5) == nil,
-        "native mapping: service-enumeration retries are bounded"
+            RemoteButtonNativeMappingRetryPolicy.delay(afterAttempt: 5) == 2 &&
+            RemoteButtonNativeMappingRetryPolicy.delay(afterAttempt: 100) == 2,
+        "native mapping: transient failures settle into a bounded retry cadence"
     )
+
+    do {
+        let fixture = NativeMappingFixture()
+        fixture.mappings = []
+        fixture.writeWorks = false
+        let mapper = fixture.mapper()
+        check(
+            mapper.applyResult(
+                locationID: 7,
+                includeHardwareVoiceMapping: true
+            ) == .serviceNotReady &&
+                fixture.savedRecords?.first?.includesHardwareVoiceMapping == true,
+            "native mapping: a rejected early write keeps one rollback owner and remains retryable"
+        )
+        fixture.writeWorks = true
+        check(
+            mapper.applyResult(
+                locationID: 7,
+                includeHardwareVoiceMapping: true
+            ) == .applied &&
+                fixture.mappings.contains(RemoteVoiceFunctionMappingPolicy.remoteVoiceKey) &&
+                RemoteButtonNativeMappingPolicy.mappings.allSatisfy(fixture.mappings.contains),
+            "native mapping: retry composes voice and ordinary mappings in one property write"
+        )
+        check(
+            mapper.restore() && fixture.mappings.isEmpty && fixture.savedRecords == [],
+            "native mapping: the combined owner restores both voice and ordinary sources"
+        )
+    }
 
     do {
         let fixture = NativeMappingFixture()
