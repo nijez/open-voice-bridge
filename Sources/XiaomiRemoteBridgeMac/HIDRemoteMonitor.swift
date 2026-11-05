@@ -58,12 +58,13 @@ private func hidInputReport(
 }
 
 final class HIDRemoteMonitor {
-    private enum NativeMappingState { case restored, applied, restoreFailed }
+    private enum NativeMappingState { case restored, pending, applied, restoreFailed }
 
     private let settings: AppSettings
     private let eventSuppressor = KeyboardEventSuppressor()
     private let nativeMapper = RemoteButtonNativeMapper()
     private var nativeMappingState = NativeMappingState.restored
+    private var nativeMappingRetryToken: UInt64 = 0
     private var manager: IOHIDManager?
     private var lifecycle = RemoteDeviceLifecycle()
     private var activeDevice: IOHIDDevice?
@@ -153,12 +154,12 @@ final class HIDRemoteMonitor {
         actionsSuppressed = suppressed
         guard suppressed else {
             if let activeDevice, !activeDeviceIsSeized,
-               !applyNativeMapping(to: activeDevice) {
-                stop()
-                updateStatus("无法安全屏蔽 RC003 原生按键；已停止自定义映射")
+               let generation = lifecycle.activeGeneration {
+                beginNativeMapping(to: activeDevice, generation: generation)
             }
             return
         }
+        cancelNativeMappingRetry()
         repeatTimers.values.forEach { $0.cancel() }
         repeatTimers.removeAll()
         resetMultiActionRuntimes()
@@ -273,6 +274,7 @@ final class HIDRemoteMonitor {
     }
 
     func stop() {
+        cancelNativeMappingRetry()
         permissionMonitor?.cancel()
         permissionMonitor = nil
         repeatTimers.values.forEach { $0.cancel() }
@@ -365,44 +367,125 @@ final class HIDRemoteMonitor {
             // double-click so a gesture straddling a reconnect cannot be completed
             // by edges from two different device generations.
             onGestureInvalidate?()
-            if !seized && !actionsSuppressed && !applyNativeMapping(to: device) {
-                // Do not close an IOHID manager from its own match callback.
-                // Reports queued before teardown are also refused below.
-                let generation = lifecycle.activeGeneration
-                DispatchQueue.main.async { [weak self] in
-                    guard let self, self.lifecycle.activeGeneration == generation else { return }
-                    self.stop()
-                    self.updateStatus("无法安全屏蔽 RC003 原生按键；已停止自定义映射")
-                }
+            if !seized && !actionsSuppressed,
+               let generation = lifecycle.activeGeneration {
+                beginNativeMapping(to: device, generation: generation)
                 return
             }
-            if seized {
-                updateStatus("RC003 按键映射已连接（独占模式）")
-                AppLogger.shared.write("HID CONNECTED mode=seized")
-            } else {
-                let suffix = actionsSuppressed ? "兼容模式；原生按键已恢复" : "兼容模式；设备级按键屏蔽"
-                updateStatus("RC003 按键映射已连接（\(suffix)）")
-                AppLogger.shared.write("HID CONNECTED mode=monitored")
-            }
-            // A successful match keeps the (already-open) pipeline healthy, so this
-            // is a no-op flip; call it for consistency with the health model.
-            syncReaderHealth()
+            reportConnected()
         }
     }
 
-    private func applyNativeMapping(to device: IOHIDDevice) -> Bool {
+    private func beginNativeMapping(to device: IOHIDDevice, generation: UInt64) {
+        cancelNativeMappingRetry()
         // A disappearing service may outlive its removal callback briefly. Clear
         // any prior-generation rollback entry before adopting a new service.
         guard nativeMapper.restore() else {
             nativeMappingState = .restoreFailed
-            return false
+            failNativeMapping(generation: generation, token: nativeMappingRetryToken, reason: "restore")
+            return
         }
         guard let location = IOHIDDeviceGetProperty(device, kIOHIDLocationIDKey as CFString) as? NSNumber else {
-            return false
+            nativeMappingState = .restoreFailed
+            failNativeMapping(generation: generation, token: nativeMappingRetryToken, reason: "missing_location")
+            return
         }
-        let applied = nativeMapper.apply(locationID: location.uint64Value)
-        nativeMappingState = applied ? .applied : .restoreFailed
-        return applied
+        nativeMappingState = .pending
+        let token = nativeMappingRetryToken
+        attemptNativeMapping(
+            to: device,
+            locationID: location.uint64Value,
+            generation: generation,
+            attempt: 0,
+            token: token
+        )
+    }
+
+    private func attemptNativeMapping(
+        to device: IOHIDDevice,
+        locationID: UInt64,
+        generation: UInt64,
+        attempt: Int,
+        token: UInt64
+    ) {
+        guard nativeMappingAttemptIsCurrent(device: device, generation: generation, token: token) else {
+            return
+        }
+        switch nativeMapper.applyResult(locationID: locationID) {
+        case .applied:
+            nativeMappingState = .applied
+            reportConnected()
+        case .failed:
+            nativeMappingState = .restoreFailed
+            failNativeMapping(generation: generation, token: token, reason: "safety_failure")
+        case .serviceNotReady:
+            guard let delay = RemoteButtonNativeMappingRetryPolicy.delay(afterAttempt: attempt) else {
+                nativeMappingState = .restoreFailed
+                failNativeMapping(generation: generation, token: token, reason: "service_timeout")
+                return
+            }
+            nativeMappingState = .pending
+            updateStatus("正在等待 RC003 系统按键服务")
+            AppLogger.shared.write(
+                "HID NATIVE MAPPING waiting attempt=\(attempt + 1) delay_ms=\(Int(delay * 1_000))"
+            )
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.attemptNativeMapping(
+                    to: device,
+                    locationID: locationID,
+                    generation: generation,
+                    attempt: attempt + 1,
+                    token: token
+                )
+            }
+        }
+    }
+
+    private func nativeMappingAttemptIsCurrent(
+        device: IOHIDDevice,
+        generation: UInt64,
+        token: UInt64
+    ) -> Bool {
+        guard token == nativeMappingRetryToken,
+              manager != nil,
+              settings.customMappingEnabled,
+              !actionsSuppressed,
+              !activeDeviceIsSeized,
+              lifecycle.activeGeneration == generation,
+              let activeDevice
+        else { return false }
+        return CFEqual(activeDevice, device)
+    }
+
+    private func failNativeMapping(generation: UInt64, token: UInt64, reason: String) {
+        // Never tear down IOHIDManager from inside its own device-match callback.
+        DispatchQueue.main.async { [weak self] in
+            guard let self,
+                  token == self.nativeMappingRetryToken,
+                  self.lifecycle.activeGeneration == generation
+            else { return }
+            AppLogger.shared.write("HID NATIVE MAPPING failed reason=\(reason)")
+            self.stop()
+            self.updateStatus("无法安全屏蔽 RC003 原生按键；已停止自定义映射")
+        }
+    }
+
+    private func cancelNativeMappingRetry() {
+        nativeMappingRetryToken &+= 1
+    }
+
+    private func reportConnected() {
+        if activeDeviceIsSeized {
+            updateStatus("RC003 按键映射已连接（独占模式）")
+            AppLogger.shared.write("HID CONNECTED mode=seized")
+        } else {
+            let suffix = actionsSuppressed ? "兼容模式；原生按键已恢复" : "兼容模式；设备级按键屏蔽"
+            updateStatus("RC003 按键映射已连接（\(suffix)）")
+            AppLogger.shared.write("HID CONNECTED mode=monitored")
+        }
+        // A successful match keeps the (already-open) pipeline healthy, so this
+        // is a no-op flip; call it for consistency with the health model.
+        syncReaderHealth()
     }
 
     private func restoreNativeMapping() {
@@ -411,6 +494,7 @@ final class HIDRemoteMonitor {
 
     fileprivate func deviceDidRemove(device: IOHIDDevice) {
         guard let activeDevice, CFEqual(activeDevice, device) else { return }
+        cancelNativeMappingRetry()
         // Invalidate the device generation FIRST so any late/queued input report
         // tagged with it is dropped, THEN force-release: this invalidates the
         // double-click gesture (even when no key is held, since this is a generation

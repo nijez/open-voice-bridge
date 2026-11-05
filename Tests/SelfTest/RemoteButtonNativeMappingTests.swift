@@ -155,10 +155,29 @@ func runRemoteButtonNativeMappingTests(_ check: (Bool, String) -> Void) {
         )
         fixture.present = false
         check(
-            !fixture.mapper().apply(locationID: 7) && fixture.writeCount == 0,
+            fixture.mapper().applyResult(locationID: 7) == .serviceNotReady && fixture.writeCount == 0,
             "native mapping: absence of an adopted service does not claim successful suppression"
         )
+        fixture.present = true
+        fixture.enumerationWorks = false
+        check(
+            fixture.mapper().applyResult(locationID: 7) == .serviceNotReady && fixture.writeCount == 0,
+            "native mapping: a temporarily unavailable service enumeration is retryable"
+        )
+        fixture.enumerationWorks = true
+        fixture.ambiguous = true
+        check(
+            fixture.mapper().applyResult(locationID: 7) == .failed && fixture.writeCount == 0,
+            "native mapping: an ambiguous service remains a non-retryable safety failure"
+        )
     }
+
+    check(
+        RemoteButtonNativeMappingRetryPolicy.delay(afterAttempt: 0) == 0.05 &&
+            RemoteButtonNativeMappingRetryPolicy.delay(afterAttempt: 4) == 1.2 &&
+            RemoteButtonNativeMappingRetryPolicy.delay(afterAttempt: 5) == nil,
+        "native mapping: service-enumeration retries are bounded"
+    )
 
     do {
         let fixture = NativeMappingFixture()

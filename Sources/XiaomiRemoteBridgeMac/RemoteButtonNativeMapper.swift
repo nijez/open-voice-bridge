@@ -58,6 +58,24 @@ struct RemoteButtonNativeMappingStore {
     }
 }
 
+enum RemoteButtonNativeMappingApplyResult: Equatable {
+    case applied
+    case serviceNotReady
+    case failed
+}
+
+enum RemoteButtonNativeMappingRetryPolicy {
+    /// The IOHID device-match callback can precede publication of the matching
+    /// AppleUserHIDEventService. Retry only that transient enumeration gap, with
+    /// a finite 2.5-second budget; every other safety failure still fails closed.
+    private static let delays: [TimeInterval] = [0.05, 0.15, 0.35, 0.75, 1.2]
+
+    static func delay(afterAttempt attempt: Int) -> TimeInterval? {
+        guard delays.indices.contains(attempt) else { return nil }
+        return delays[attempt]
+    }
+}
+
 /// Main-thread lifecycle owner for the adopted RC003's ordinary-key mappings.
 /// Persist rollback data BEFORE writing so relaunch can recover after a crash.
 /// The registry ID restricts rollback to the original service; a disconnected
@@ -92,21 +110,47 @@ final class RemoteButtonNativeMapper {
 
     @discardableResult
     func apply(locationID: UInt64) -> Bool {
-        guard let records, records.isEmpty, let present = services() else { return false }
+        applyResult(locationID: locationID) == .applied
+    }
+
+    func applyResult(locationID: UInt64) -> RemoteButtonNativeMappingApplyResult {
+        guard let records else {
+            log("HID NATIVE MAPPING apply_failed invalid_ledger")
+            return .failed
+        }
+        guard records.isEmpty else {
+            log("HID NATIVE MAPPING apply_failed pending_rollback=\(records.count)")
+            return .failed
+        }
+        guard let present = services() else {
+            log("HID NATIVE MAPPING service_not_ready enumeration")
+            return .serviceNotReady
+        }
         let targets = present.filter { $0.locationID == locationID }
-        guard targets.count == 1, let service = targets.first else { return false }
+        guard !targets.isEmpty else {
+            log("HID NATIVE MAPPING service_not_ready location=\(locationID) present=\(present.count)")
+            return .serviceNotReady
+        }
+        guard targets.count == 1, let service = targets.first else {
+            log("HID NATIVE MAPPING apply_failed ambiguous=\(targets.count) location=\(locationID)")
+            return .failed
+        }
         let saved = RemoteButtonNativeMappingRecord(
             registryID: service.registryID,
             originals: service.mappings.filter { RemoteButtonNativeMappingPolicy.sources.contains($0.source) }
         )
-        guard save([saved]) else { return false }
+        guard save([saved]) else {
+            log("HID NATIVE MAPPING apply_failed backup")
+            return .failed
+        }
         let desired = RemoteButtonNativeMappingPolicy.applying(to: service.mappings)
         guard service.writeAndVerify(desired) else {
             _ = restore()
-            return false
+            log("HID NATIVE MAPPING apply_failed write_verify")
+            return .failed
         }
         log("HID NATIVE MAPPING applied registry=\(service.registryID) keys=\(RemoteButtonNativeMappingPolicy.mappings.count)")
-        return true
+        return .applied
     }
 
     @discardableResult
