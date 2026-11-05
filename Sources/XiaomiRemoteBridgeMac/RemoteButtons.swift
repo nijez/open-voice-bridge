@@ -94,7 +94,7 @@ enum RemoteButton: String, CaseIterable, Codable, Identifiable {
     }
 }
 
-enum RemoteNativeEvent: Equatable {
+enum RemoteNativeEvent: Equatable, Hashable {
     case keyboard(keyCode: UInt16)
     case systemKey(type: Int32)
 }
@@ -154,6 +154,7 @@ struct KeyChord: Codable, Equatable, Hashable {
         static let control = Self(rawValue: 1 << 1)
         static let option = Self(rawValue: 1 << 2)
         static let shift = Self(rawValue: 1 << 3)
+        static let function = Self(rawValue: 1 << 4)
     }
 
     let keyCode: UInt16
@@ -175,13 +176,39 @@ struct KeyChord: Codable, Equatable, Hashable {
     }
 }
 
+struct ApplicationTarget: Codable, Equatable {
+    let path: String
+    let bundleIdentifier: String?
+    let name: String
+
+    var isValid: Bool {
+        (path as NSString).isAbsolutePath &&
+            URL(fileURLWithPath: path).pathExtension.lowercased() == "app" &&
+            !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    static func application(at url: URL) -> Self? {
+        guard url.isFileURL, url.pathExtension.lowercased() == "app",
+              let bundle = Bundle(url: url),
+              bundle.object(forInfoDictionaryKey: "CFBundlePackageType") as? String == "APPL",
+              let executable = bundle.executableURL,
+              FileManager.default.isExecutableFile(atPath: executable.path)
+        else { return nil }
+        let name = bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
+            ?? bundle.object(forInfoDictionaryKey: "CFBundleName") as? String
+            ?? url.deletingPathExtension().lastPathComponent
+        return Self(path: url.path, bundleIdentifier: bundle.bundleIdentifier, name: name)
+    }
+}
+
 enum ButtonBinding: Codable, Equatable {
     case preset(ButtonAction)
     case shortcut(KeyChord)
+    case openApplication(ApplicationTarget)
     case hardwareFn
 
-    private enum CodingKeys: String, CodingKey { case type, action, chord }
-    private enum Kind: String, Codable { case preset, shortcut, hardwareFn }
+    private enum CodingKeys: String, CodingKey { case type, action, chord, application }
+    private enum Kind: String, Codable { case preset, shortcut, openApplication, hardwareFn }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -190,6 +217,8 @@ enum ButtonBinding: Codable, Equatable {
             self = .preset(try container.decode(ButtonAction.self, forKey: .action))
         case .shortcut:
             self = .shortcut(try container.decode(KeyChord.self, forKey: .chord))
+        case .openApplication:
+            self = .openApplication(try container.decode(ApplicationTarget.self, forKey: .application))
         case .hardwareFn:
             self = .hardwareFn
         }
@@ -204,6 +233,9 @@ enum ButtonBinding: Codable, Equatable {
         case let .shortcut(chord):
             try container.encode(Kind.shortcut, forKey: .type)
             try container.encode(chord, forKey: .chord)
+        case let .openApplication(application):
+            try container.encode(Kind.openApplication, forKey: .type)
+            try container.encode(application, forKey: .application)
         case .hardwareFn:
             try container.encode(Kind.hardwareFn, forKey: .type)
         }
@@ -213,6 +245,7 @@ enum ButtonBinding: Codable, Equatable {
         switch self {
         case let .preset(action): return action.displayName
         case let .shortcut(chord): return chord.displayName
+        case let .openApplication(application): return "打开 \(application.name)"
         case .hardwareFn: return "硬件 Fn（默认语音）"
         }
     }
@@ -220,6 +253,111 @@ enum ButtonBinding: Codable, Equatable {
     var isDisabled: Bool {
         if case .preset(.disabled) = self { return true }
         return false
+    }
+
+    /// V2 readers decode the entire map together and cannot read newer kinds.
+    /// Preserve their supported actions and disable only unsupported ones.
+    var legacyV2Binding: ButtonBinding {
+        switch self {
+        case .preset, .shortcut, .hardwareFn: return self
+        case .openApplication: return .preset(.disabled)
+        }
+    }
+}
+
+enum ButtonGestureSlot: String, CaseIterable, Codable, Identifiable {
+    case single
+    case doublePress = "double"
+    case longPress = "long"
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .single: return "单击"
+        case .doublePress: return "双击"
+        case .longPress: return "长按"
+        }
+    }
+}
+
+struct MultiActionButtonBinding: Codable, Equatable {
+    var single: ButtonBinding
+    var doublePress: ButtonBinding?
+    var longPress: ButtonBinding?
+
+    init(
+        single: ButtonBinding,
+        doublePress: ButtonBinding? = nil,
+        longPress: ButtonBinding? = nil
+    ) {
+        self.single = single
+        self.doublePress = doublePress
+        self.longPress = longPress
+    }
+
+    var hasAdditionalActions: Bool {
+        doublePress != nil || longPress != nil
+    }
+
+    func binding(for slot: ButtonGestureSlot) -> ButtonBinding? {
+        switch slot {
+        case .single: return single
+        case .doublePress: return doublePress
+        case .longPress: return longPress
+        }
+    }
+
+    mutating func setBinding(_ binding: ButtonBinding?, for slot: ButtonGestureSlot) {
+        switch slot {
+        case .single:
+            if let binding { single = binding }
+        case .doublePress:
+            doublePress = binding
+        case .longPress:
+            longPress = binding
+        }
+    }
+}
+
+enum MultiActionTimingInput {
+    static func digits(in text: String) -> String {
+        text.filter { $0 >= "0" && $0 <= "9" }
+    }
+
+    static func committedValue(
+        from text: String, fallback: Int, range: ClosedRange<Int>
+    ) -> Int {
+        let filtered = digits(in: text)
+        // An empty edit restores the saved value. An integer overflow can only
+        // represent an excessively large nonnegative input, so use the maximum.
+        let value = filtered.isEmpty ? fallback : (Int(filtered) ?? range.upperBound)
+        return min(max(value, range.lowerBound), range.upperBound)
+    }
+}
+
+enum MultiActionTiming {
+    static let defaultDoubleClickMs = 350
+    static let defaultLongPressMs = 500
+    static let minimumDoubleClickMs = 200
+    static let maximumDoubleClickMs = 600
+    static let minimumLongPressMs = 300
+    static let maximumLongPressMs = 1_500
+    static let minimumGapMs = 50
+
+    static func normalized(doubleClickMs: Int, longPressMs: Int) -> (doubleClickMs: Int, longPressMs: Int) {
+        let doubleClick = min(
+            max(doubleClickMs, minimumDoubleClickMs),
+            maximumDoubleClickMs
+        )
+        var longPress = min(
+            max(longPressMs, minimumLongPressMs),
+            maximumLongPressMs
+        )
+        if longPress <= doubleClick {
+            longPress = min(maximumLongPressMs, doubleClick + minimumGapMs)
+        }
+        return (doubleClick, longPress)
     }
 }
 
@@ -266,6 +404,20 @@ enum RemoteHIDReportParser {
 }
 
 enum HIDPermissionGate {
+    /// Check live permissions at the platform delivery boundary, including
+    /// timer-driven actions. Releases still get a best-effort delivery attempt.
+    static func deliverGestureOutputs(
+        _ outputs: [MultiActionGestureOutput],
+        permissionsAreValid: () -> Bool,
+        perform: (MultiActionGestureOutput) -> Bool
+    ) -> Bool {
+        for output in outputs {
+            if output != .endHold && !permissionsAreValid() { return false }
+            guard perform(output) else { return false }
+        }
+        return true
+    }
+
     static func canMonitor(
         mappingEnabled: Bool,
         inputMonitoringGranted: Bool,
