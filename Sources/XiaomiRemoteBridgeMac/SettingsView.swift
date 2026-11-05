@@ -388,6 +388,13 @@ struct SettingsView: View {
             Text("关闭只影响下次登录，不会退出当前应用。")
                 .font(.footnote)
                 .foregroundColor(.secondary)
+            Toggle("在 Dock 中显示应用图标", isOn: Binding(
+                get: { settings.dockIconVisible },
+                set: { settings.dockIconVisible = $0 }
+            ))
+            Text("关闭后应用仍在后台运行，可从菜单栏图标打开设置或退出。")
+                .font(.footnote)
+                .foregroundColor(.secondary)
             Divider()
             statusRow("当前版本", value: updateController.currentVersionText)
             Toggle("自动检查更新", isOn: Binding(

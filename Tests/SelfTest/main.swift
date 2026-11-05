@@ -793,13 +793,15 @@ if let defaults = UserDefaults(suiteName: suiteName) {
             settings.selectedDeviceProfile == .xiaomiRC003 &&
             settings.xiaomiRemoteVariant == .rc003Pro &&
             settings.localFnMicEnabled &&
-            settings.launchAtLoginEnabled,
+            settings.launchAtLoginEnabled &&
+            settings.dockIconVisible,
         "saved bindings and legacy mapping toggle migrate"
     )
     settings.selectedDeviceProfile = .djiMic2
     settings.xiaomiRemoteVariant = .arn9
     settings.localFnMicEnabled = false
     settings.launchAtLoginEnabled = false
+    settings.dockIconVisible = false
     let reloaded = AppSettings(defaults: defaults)
     check(
         reloaded.selectedDeviceProfile == .djiMic2 &&
@@ -807,8 +809,9 @@ if let defaults = UserDefaults(suiteName: suiteName) {
             !reloaded.xiaomiRemoteVariant.mappableButtons.contains(.tv) &&
             !reloaded.localFnMicEnabled &&
             !reloaded.launchAtLoginEnabled &&
+            !reloaded.dockIconVisible &&
             MacDeviceProfile.allCases == [.xiaomiRC003, .djiMic2],
-        "Mac device selector and login-start preference persist"
+        "Mac device selector, login-start, and Dock icon preferences persist"
     )
     defaults.removePersistentDomain(forName: suiteName)
 } else {

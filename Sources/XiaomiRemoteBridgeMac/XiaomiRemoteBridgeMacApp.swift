@@ -10,7 +10,7 @@ enum XiaomiRemoteBridgeMacApp {
         let application = NSApplication.shared
         let delegate = XiaomiRemoteBridgeAppDelegate()
         application.delegate = delegate
-        application.setActivationPolicy(.regular)
+        application.setActivationPolicy(delegate.initialActivationPolicy)
         withExtendedLifetime(delegate) {
             application.run()
         }
@@ -33,6 +33,10 @@ private final class XiaomiRemoteBridgeAppDelegate: NSObject, NSApplicationDelega
     private let bridgeStatusItem = NSMenuItem(title: "桥接已启用", action: nil, keyEquivalent: "")
     private let bridgeToggleItem = NSMenuItem(title: "停用桥接", action: nil, keyEquivalent: "")
     private let reconnectItem = NSMenuItem(title: "立即重新连接", action: nil, keyEquivalent: "")
+
+    var initialActivationPolicy: NSApplication.ActivationPolicy {
+        model.settings.dockIconVisible ? .regular : .accessory
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installTerminationSignalHandlers()
@@ -160,6 +164,14 @@ private final class XiaomiRemoteBridgeAppDelegate: NSObject, NSApplicationDelega
                 self?.refreshMenuStatus()
             }
         .store(in: &subscriptions)
+
+        model.settings.$dockIconVisible
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { visible in
+                NSApp.setActivationPolicy(visible ? .regular : .accessory)
+            }
+            .store(in: &subscriptions)
 
         model.$pendingHIDPermissionReminder
             .removeDuplicates()
