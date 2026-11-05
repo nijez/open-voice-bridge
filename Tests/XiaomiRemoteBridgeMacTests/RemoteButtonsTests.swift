@@ -159,6 +159,19 @@ struct RemoteButtonsTests {
         #expect(!reloaded.launchAtLoginEnabled)
     }
 
+    @Test func dockIconDefaultsVisibleAndPersistsMenuBarOnlyMode() throws {
+        let suiteName = "XiaomiRemoteBridgeMacTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let initial = AppSettings(defaults: defaults)
+        #expect(initial.dockIconVisible)
+        initial.dockIconVisible = false
+
+        let reloaded = AppSettings(defaults: defaults)
+        #expect(!reloaded.dockIconVisible)
+    }
+
     @Test func localFnMicrophoneDefaultsOnAndPersistsOptOut() throws {
         let suiteName = "XiaomiRemoteBridgeMacTests.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suiteName))

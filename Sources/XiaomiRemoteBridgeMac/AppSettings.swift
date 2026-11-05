@@ -87,6 +87,7 @@ final class AppSettings: ObservableObject {
         static let localMicInputUID = "localMicInputUID"
         static let doubleClickToggleEnabled = "doubleClickToggleEnabled"
         static let launchAtLoginEnabled = "launchAtLoginEnabled"
+        static let dockIconVisible = "dockIconVisible"
     }
 
     private let defaults: UserDefaults
@@ -133,6 +134,13 @@ final class AppSettings: ObservableObject {
         didSet { defaults.set(doubleClickToggleEnabled, forKey: Keys.doubleClickToggleEnabled) }
     }
 
+    /// Whether the application appears in the Dock and app switcher. Existing
+    /// installations keep the regular-app behavior unless the user explicitly
+    /// opts into the menu-bar-only mode.
+    @Published var dockIconVisible: Bool {
+        didSet { defaults.set(dockIconVisible, forKey: Keys.dockIconVisible) }
+    }
+
     /// Desired login-item state. On by default so the bridge is available after
     /// a restart; the platform manager reports whether the OS accepted it.
     @Published var launchAtLoginEnabled: Bool {
@@ -177,6 +185,9 @@ final class AppSettings: ObservableObject {
         doubleClickToggleEnabled = defaults.object(forKey: Keys.doubleClickToggleEnabled) == nil
             ? true
             : defaults.bool(forKey: Keys.doubleClickToggleEnabled)
+        dockIconVisible = defaults.object(forKey: Keys.dockIconVisible) == nil
+            ? true
+            : defaults.bool(forKey: Keys.dockIconVisible)
         launchAtLoginEnabled = defaults.object(forKey: Keys.launchAtLoginEnabled) == nil
             ? true
             : defaults.bool(forKey: Keys.launchAtLoginEnabled)
