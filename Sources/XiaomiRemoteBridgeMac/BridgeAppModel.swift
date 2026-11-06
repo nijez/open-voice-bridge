@@ -52,9 +52,10 @@ final class BridgeAppModel: ObservableObject, XiaomiBluetoothBridgeDelegate {
     /// Local physical-Fn audio shares the output node but never affects these
     /// remote PCM / queue / playback indicators.
     private var remoteAudioDiagnosticsSession: AudioPathDiagnostics.Session?
-    /// One retained IOHID event-system client supplies every read/write snapshot
-    /// for both the F5→Fn policy and ordinary-button suppression. This prevents
-    /// two independent clients from observing different readiness generations.
+    /// One coordinated service-snapshot factory and ownership ledger serve both
+    /// the F5→Fn policy and ordinary-button suppression. Each snapshot uses a
+    /// fresh event-system client so a Bluetooth service replacement cannot leave
+    /// either policy writing through a stale service handle.
     private let nativeMappingServices = RemoteButtonNativeMapper.liveServices()
     private let nativeMappingOwnership = RemoteNativeMappingOwnership()
     private lazy var buttonNativeMapper = RemoteButtonNativeMapper(

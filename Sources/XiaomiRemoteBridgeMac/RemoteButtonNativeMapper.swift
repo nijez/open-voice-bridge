@@ -203,13 +203,29 @@ final class RemoteButtonNativeMapper {
         locationID: UInt64,
         includeHardwareVoiceMapping: Bool = false
     ) -> RemoteButtonNativeMappingApplyResult {
-        guard let records else {
+        guard var activeRecords = records else {
             log("HID NATIVE MAPPING apply_failed invalid_ledger")
             return .failed
         }
         guard let present = services() else {
             log("HID NATIVE MAPPING service_not_ready enumeration")
             return .serviceNotReady
+        }
+        let presentRegistryIDs = Set(present.map(\.registryID))
+        let staleRecords = activeRecords.filter {
+            !presentRegistryIDs.contains($0.registryID)
+        }
+        if !staleRecords.isEmpty {
+            for record in staleRecords {
+                pendingAcceptedWriteRegistryIDs.remove(record.registryID)
+                ownership.setCombinedVoiceMappingOwned(false, registryID: record.registryID)
+            }
+            activeRecords.removeAll { !presentRegistryIDs.contains($0.registryID) }
+            guard save(activeRecords) else {
+                log("HID NATIVE MAPPING apply_failed stale_ledger_clear")
+                return .failed
+            }
+            log("HID NATIVE MAPPING service_replaced stale=\(staleRecords.count)")
         }
         let targets = present.filter { $0.locationID == locationID }
         guard !targets.isEmpty else {
@@ -220,7 +236,7 @@ final class RemoteButtonNativeMapper {
             log("HID NATIVE MAPPING apply_failed ambiguous=\(targets.count) location=\(locationID)")
             return .failed
         }
-        if records.isEmpty {
+        if activeRecords.isEmpty {
             let managedSources = RemoteButtonNativeMappingPolicy.sources.union(
                 includeHardwareVoiceMapping
                     ? [RemoteVoiceFunctionMappingPolicy.remoteVoiceKey.source]
@@ -239,10 +255,10 @@ final class RemoteButtonNativeMapper {
                 includeHardwareVoiceMapping,
                 registryID: service.registryID
             )
-        } else if records.count != 1 ||
-            records[0].registryID != service.registryID ||
-            records[0].includesHardwareVoiceMapping != includeHardwareVoiceMapping {
-            log("HID NATIVE MAPPING apply_failed pending_rollback=\(records.count)")
+        } else if activeRecords.count != 1 ||
+            activeRecords[0].registryID != service.registryID ||
+            activeRecords[0].includesHardwareVoiceMapping != includeHardwareVoiceMapping {
+            log("HID NATIVE MAPPING apply_failed pending_rollback=\(activeRecords.count)")
             return .failed
         }
         var desired = RemoteButtonNativeMappingPolicy.applying(to: service.mappings)
@@ -323,9 +339,13 @@ final class RemoteButtonNativeMapper {
     }
 
     static func liveServices() -> () -> [RemoteButtonNativeMappingService]? {
-        // Keep the client alive for enumeration, property writes, and read-back.
-        let client = IOHIDEventSystemClientCreateSimpleClient(kCFAllocatorDefault)
         return {
+            // IOHIDEventSystemClient can keep a removed AppleUserHIDEventService
+            // handle indefinitely after Bluetooth reconnect. A fresh client per
+            // snapshot is required to discover the replacement RegistryID. Each
+            // service writer captures this client so it remains alive through the
+            // property set and read-back verification for this one snapshot.
+            let client = IOHIDEventSystemClientCreateSimpleClient(kCFAllocatorDefault)
             guard let identity = VoiceBridgeDeviceProfiles.xiaomiRC003.hidIdentity,
                   let live = IOHIDEventSystemClientCopyServices(client) as? [IOHIDServiceClient]
             else { return nil }

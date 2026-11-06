@@ -11,6 +11,7 @@ private final class NativeMappingFixture {
     var verifyWorks = true
     var writeCount = 0
     var wroteWithBackup = false
+    var registryID: UInt64 = 42
     let ownership = RemoteNativeMappingOwnership()
 
     func mapper() -> RemoteButtonNativeMapper {
@@ -40,12 +41,12 @@ private final class NativeMappingFixture {
         guard enumerationWorks else { return nil }
         guard present else { return [] }
         let service = RemoteButtonNativeMappingService(
-            registryID: 42, locationID: 7, mappings: mappings,
+            registryID: registryID, locationID: 7, mappings: mappings,
             writeAndVerify: { [self] desired in
                 writeCount += 1
                 wroteWithBackup = data.flatMap {
                     try? JSONDecoder().decode([RemoteButtonNativeMappingRecord].self, from: $0)
-                }?.contains(where: { $0.registryID == 42 }) == true
+                }?.contains(where: { $0.registryID == registryID }) == true
                 guard writeWorks else { return .setRejected }
                 mappings = desired
                 return verifyWorks ? .verified : .readbackMismatch
@@ -136,6 +137,20 @@ func runRemoteButtonNativeMappingTests(_ check: (Bool, String) -> Void) {
                 voiceMapper.restore() && fixture.mappings.isEmpty,
             "native mapping: voice reconciliation never adopts the combined owner's F5 as user state"
         )
+    }
+
+    do {
+        let fixture = NativeMappingFixture()
+        let mapper = fixture.mapper()
+        check(mapper.apply(locationID: 7), "native mapping: initial service generation applies")
+        fixture.registryID = 43
+        fixture.mappings = [RemoteVoiceFunctionMappingPolicy.remoteVoiceKey]
+        check(
+            mapper.applyResult(locationID: 7) == .applied &&
+                fixture.savedRecords?.map(\.registryID) == [43],
+            "native mapping: a replacement RegistryID drops the vanished generation and adopts the live service"
+        )
+        check(mapper.restore(), "native mapping: replacement-service ownership remains recoverable")
     }
 
     check(
