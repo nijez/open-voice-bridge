@@ -52,7 +52,25 @@ final class BridgeAppModel: ObservableObject, XiaomiBluetoothBridgeDelegate {
     /// Local physical-Fn audio shares the output node but never affects these
     /// remote PCM / queue / playback indicators.
     private var remoteAudioDiagnosticsSession: AudioPathDiagnostics.Session?
-    private let voiceFunctionMapper = RemoteVoiceFunctionMapper()
+    /// One coordinated service-snapshot factory and ownership ledger serve both
+    /// the F5→Fn policy and ordinary-button suppression. Each snapshot uses a
+    /// fresh event-system client so a Bluetooth service replacement cannot leave
+    /// either policy writing through a stale service handle.
+    private let nativeMappingServices = RemoteButtonNativeMapper.liveServices()
+    private let nativeMappingOwnership = RemoteNativeMappingOwnership()
+    private lazy var buttonNativeMapper = RemoteButtonNativeMapper(
+        services: nativeMappingServices,
+        ownership: nativeMappingOwnership
+    )
+    private lazy var voiceFunctionMapper: RemoteVoiceFunctionMapper = {
+        // Load the persisted combined-owner ledger before the voice policy ever
+        // interprets a live F5 value after a crash/relaunch.
+        _ = buttonNativeMapper
+        return RemoteVoiceFunctionMapper(
+            services: nativeMappingServices,
+            ownership: nativeMappingOwnership
+        )
+    }()
     private let localMicBridge = LocalMicrophoneBridge()
     private let remoteVoiceKeyMonitor = RemoteVoiceKeyMonitor()
     private var testToneGeneration = 0
@@ -74,7 +92,10 @@ final class BridgeAppModel: ObservableObject, XiaomiBluetoothBridgeDelegate {
     private var mappingRestoreFailed = false
     private lazy var bluetoothBridge = XiaomiBluetoothBridge(settings: settings, delegate: self)
     private lazy var hidMonitor: HIDRemoteMonitor = {
-        let monitor = HIDRemoteMonitor(settings: settings)
+        let monitor = HIDRemoteMonitor(
+            settings: settings,
+            nativeMapper: buttonNativeMapper
+        )
         monitor.onStatus = { [weak self] value in
             self?.hidStatus = value
         }
@@ -553,6 +574,10 @@ final class BridgeAppModel: ObservableObject, XiaomiBluetoothBridgeDelegate {
         // A restart re-opens the monitor with actions un-gated; re-assert the
         // current runtime gate so a disabled bridge keeps suppressing injection.
         hidMonitor.setActionsSuppressed(!bridgeEnabled)
+        // The HID monitor may have restored a mapping generation while closing
+        // its previous device. Reconcile the voice policy again through the same
+        // retained service channel, including when custom ordinary mapping is off.
+        _ = applyVoiceFunctionMapping()
         hidStatus = hidMonitor.status
         updateRemoteVoiceKeyObservation()
     }

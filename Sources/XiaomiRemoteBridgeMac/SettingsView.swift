@@ -48,13 +48,23 @@ private enum DeviceWorkspaceSelection: String, CaseIterable, Identifiable {
     }
 }
 
+private struct ShortcutRecordingTarget: Identifiable {
+    let button: RemoteButton
+    let slot: ButtonGestureSlot
+
+    var id: String { "\(button.rawValue)-\(slot.rawValue)" }
+}
+
 struct SettingsView: View {
     @ObservedObject var model: BridgeAppModel
     @ObservedObject var settings: AppSettings
     @ObservedObject var launchAtLogin: LaunchAtLoginManager
     @ObservedObject var updateController: AppUpdateController
     @State private var selectedRemoteButton: RemoteButton = .ok
-    @State private var recordingRemoteButton: RemoteButton?
+    @State private var recordingTarget: ShortcutRecordingTarget?
+    @State private var expandedMultiActionButton: RemoteButton?
+    @State private var doubleClickTimingText: String
+    @State private var longPressTimingText: String
     @State private var bridgeHelpPresented = false
     @State private var audioDiagnosticsExpanded = false
     @State private var localFnHelpExpanded = false
@@ -71,6 +81,8 @@ struct SettingsView: View {
         settings = model.settings
         launchAtLogin = model.launchAtLoginManager
         self.updateController = updateController
+        _doubleClickTimingText = State(initialValue: String(model.settings.multiActionDoubleClickMs))
+        _longPressTimingText = State(initialValue: String(model.settings.multiActionLongPressMs))
     }
 
     var body: some View {
@@ -437,81 +449,97 @@ struct SettingsView: View {
     }
 
     private var rc003MappingTab: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            GroupBox {
-                VStack(alignment: .leading, spacing: 8) {
-                    Toggle("启用 \(settings.xiaomiRemoteVariant.shortName) 自定义按键映射", isOn: Binding(
-                    get: { settings.customMappingEnabled },
-                    set: { enabled in
-                        settings.customMappingEnabled = enabled
-                        model.applyHIDSettings()
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Toggle("启用 \(settings.xiaomiRemoteVariant.shortName) 自定义按键映射", isOn: Binding(
+                        get: { settings.customMappingEnabled },
+                        set: { enabled in
+                            settings.customMappingEnabled = enabled
+                            model.applyHIDSettings()
+                        }
+                    ))
+                        statusRow("按键状态", value: model.hidStatus)
+                        Text("优先独占 RC003；兼容模式在遥控器设备层屏蔽非语音键的原生输入，再执行配置动作，其他键盘不受影响。")
+                            .font(.footnote)
+                            .foregroundColor(.secondary)
                     }
-                ))
-                    statusRow("按键状态", value: model.hidStatus)
-                    Text("优先独占 RC003；系统不允许独占时自动使用兼容监听，并只在遥控器原始报告附近拦截对应的系统按键，避免影响其他键盘。")
-                        .font(.footnote)
-                        .foregroundColor(.secondary)
                 }
-            }
 
-            HStack(alignment: .top, spacing: 16) {
-                RemoteControlDiagram(
-                    selectedButton: $selectedRemoteButton,
-                    voiceActive: model.isStreaming,
-                    variant: settings.xiaomiRemoteVariant
-                )
-                    .frame(width: 210)
-
-                Divider()
-
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("按键动作")
-                                .font(.headline)
-                            Text("点击左侧按键定位；修改后自动保存。")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                        Spacer()
-                        Button("恢复默认") {
-                            if model.resetButtonBindings() {
-                                selectedRemoteButton = .ok
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("动作映射")
+                                    .font(.headline)
+                                Text("点击左侧按键定位；修改后自动保存。")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
                             }
-                        }
-                    }
-
-                    ScrollViewReader { proxy in
-                        ScrollView {
-                            LazyVStack(spacing: 7) {
-                                ForEach(settings.xiaomiRemoteVariant.mappableButtons) { button in
-                                    mappingRow(button)
-                                        .id(button.id)
+                            Spacer()
+                            Button("恢复默认") {
+                                if model.resetButtonBindings() {
+                                    selectedRemoteButton = .ok
                                 }
                             }
-                            .padding(.trailing, 4)
                         }
-                        .onChange(of: selectedRemoteButton) { button in
-                            withAnimation(.easeInOut(duration: 0.2)) {
-                                proxy.scrollTo(button.id, anchor: .center)
+
+                        HStack(alignment: .top, spacing: 16) {
+                            RemoteControlDiagram(
+                                selectedButton: $selectedRemoteButton,
+                                voiceActive: model.isStreaming,
+                                variant: settings.xiaomiRemoteVariant,
+                                diagramWidth: 190,
+                                diagramHeight: 385
+                            )
+                                .frame(width: 190)
+
+                            Divider()
+
+                            ScrollViewReader { proxy in
+                                ScrollView {
+                                    LazyVStack(spacing: 7) {
+                                        ForEach(settings.xiaomiRemoteVariant.mappableButtons) { button in
+                                            mappingRow(button)
+                                                .id(button.id)
+                                        }
+                                    }
+                                    .padding(.trailing, 4)
+                                }
+                                .onChange(of: selectedRemoteButton) { button in
+                                    withAnimation(.easeInOut(duration: 0.2)) {
+                                        proxy.scrollTo(button.id, anchor: .center)
+                                    }
+                                }
                             }
+                            .frame(height: 415)
                         }
+
+                        Divider()
+
+                        gestureTimingSection
                     }
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(4)
         }
-        .padding(4)
-        .sheet(item: $recordingRemoteButton) { button in
+        .sheet(item: $recordingTarget) { target in
             ShortcutRecorderView(
-                button: button,
-                onCancel: { recordingRemoteButton = nil },
+                button: target.button,
+                onCancel: { recordingTarget = nil },
                 onClear: {
-                    setBinding(.preset(.disabled), for: button)
-                    recordingRemoteButton = nil
+                    setBinding(
+                        target.slot == .single ? .preset(.disabled) : nil,
+                        for: target.button,
+                        slot: target.slot
+                    )
+                    recordingTarget = nil
                 },
                 onRecord: { chord in
-                    setBinding(.shortcut(chord), for: button)
-                    recordingRemoteButton = nil
+                    setBinding(.shortcut(chord), for: target.button, slot: target.slot)
+                    recordingTarget = nil
                 }
             )
         }
@@ -548,54 +576,54 @@ struct SettingsView: View {
     }
 
     private func mappingRow(_ button: RemoteButton) -> some View {
-        HStack(spacing: 10) {
-            Button {
-                selectedRemoteButton = button
-            } label: {
-                HStack(spacing: 9) {
-                    Text(button.shortLabel)
-                        .font(.caption.weight(.semibold))
-                        .frame(width: 42, height: 30)
-                        .background(
-                            selectedRemoteButton == button
-                                ? Color.accentColor
-                                : Color.secondary.opacity(0.14)
-                        )
-                        .foregroundColor(selectedRemoteButton == button ? .white : .primary)
-                        .clipShape(Capsule())
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(button.displayName)
-                        Text(String(format: "HID 0x%02X", button.hidUsage))
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundColor(.secondary)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 10) {
+                Button {
+                    selectedRemoteButton = button
+                } label: {
+                    HStack(spacing: 9) {
+                        Text(button.shortLabel)
+                            .font(.caption.weight(.semibold))
+                            .frame(width: 42, height: 30)
+                            .background(
+                                selectedRemoteButton == button
+                                    ? Color.accentColor
+                                    : Color.secondary.opacity(0.14)
+                            )
+                            .foregroundColor(selectedRemoteButton == button ? .white : .primary)
+                            .clipShape(Capsule())
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(button.displayName)
+                            Text(String(format: "HID 0x%02X", button.hidUsage))
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundColor(.secondary)
+                            if button != .microphone {
+                                configuredGestureBadges(for: button)
+                            }
+                        }
                     }
                 }
-            }
-            .buttonStyle(.plain)
+                .buttonStyle(.plain)
 
-            Spacer(minLength: 8)
+                Spacer(minLength: 8)
 
-            Menu {
-                if button == .microphone {
-                    Button("硬件 Fn（默认语音）") { setBinding(.hardwareFn, for: button) }
-                    Button("禁用") { setBinding(.preset(.disabled), for: button) }
-                } else {
-                    ForEach(ButtonAction.allCases) { action in
-                        Button(action.displayName) { setBinding(.preset(action), for: button) }
+                bindingMenu(for: button, slot: .single, width: button == .microphone ? 208 : 142)
+
+                if button != .microphone {
+                    Button(expandedMultiActionButton == button ? "收起" : "手势…") {
+                        withAnimation(.easeInOut(duration: 0.18)) {
+                            selectedRemoteButton = button
+                            expandedMultiActionButton = expandedMultiActionButton == button ? nil : button
+                        }
                     }
+                    .frame(width: 62)
                 }
-                Divider()
-                Button("录制自定义快捷键…") { recordingRemoteButton = button }
-            } label: {
-                HStack(spacing: 6) {
-                    Text(settings.binding(for: button).displayName).lineLimit(1)
-                    Image(systemName: "chevron.up.chevron.down")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                }
-                .frame(width: 208, alignment: .leading)
             }
-            .menuStyle(.borderlessButton)
+
+            if expandedMultiActionButton == button, button != .microphone {
+                Divider().padding(.vertical, 8)
+                multiActionEditor(for: button)
+            }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
@@ -616,11 +644,213 @@ struct SettingsView: View {
         )
     }
 
-    private func setBinding(_ binding: ButtonBinding, for button: RemoteButton) {
-        if button == .microphone {
+    @ViewBuilder
+    private func configuredGestureBadges(for button: RemoteButton) -> some View {
+        let binding = settings.multiActionBinding(for: button)
+        if binding.hasAdditionalActions {
+            HStack(spacing: 4) {
+                if binding.doublePress != nil { gestureBadge("双击") }
+                if binding.longPress != nil { gestureBadge("长按") }
+            }
+        }
+    }
+
+    private func gestureBadge(_ title: String) -> some View {
+        Text(title)
+            .font(.system(size: 9, weight: .semibold))
+            .foregroundColor(.accentColor)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Color.accentColor.opacity(0.12))
+            .clipShape(Capsule())
+    }
+
+    private func multiActionEditor(for button: RemoteButton) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text("按键手势")
+                .font(.subheadline.weight(.semibold))
+            gestureBindingRow(button: button, slot: .single)
+            gestureBindingRow(button: button, slot: .doublePress)
+            gestureBindingRow(button: button, slot: .longPress)
+        }
+        .padding(10)
+        .background(Color.accentColor.opacity(0.045))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private func gestureBindingRow(button: RemoteButton, slot: ButtonGestureSlot) -> some View {
+        HStack(spacing: 10) {
+            Text(slot.displayName)
+                .font(.callout)
+                .frame(width: 42, alignment: .leading)
+            Spacer(minLength: 8)
+            bindingMenu(for: button, slot: slot, width: 230)
+        }
+    }
+
+    private func bindingMenu(
+        for button: RemoteButton,
+        slot: ButtonGestureSlot,
+        width: CGFloat
+    ) -> some View {
+        Menu {
+            if slot != .single {
+                Button("未设置") { setBinding(nil, for: button, slot: slot) }
+                Divider()
+            }
+            if button == .microphone, slot == .single {
+                Button("硬件 Fn（默认语音）") { setBinding(.hardwareFn, for: button, slot: slot) }
+                Button("禁用") { setBinding(.preset(.disabled), for: button, slot: slot) }
+            } else {
+                ForEach(ButtonAction.allCases) { action in
+                    if slot == .single || action != .disabled {
+                        Button(action.displayName) {
+                            setBinding(.preset(action), for: button, slot: slot)
+                        }
+                    }
+                }
+            }
+            Divider()
+            if button != .microphone {
+                Button("打开指定应用…") {
+                    chooseApplication(for: button, slot: slot)
+                }
+            }
+            Button("录制自定义快捷键…") {
+                recordingTarget = ShortcutRecordingTarget(button: button, slot: slot)
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Text(settings.binding(for: button, slot: slot)?.displayName ?? "未设置")
+                    .lineLimit(1)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+            .frame(width: width, alignment: .leading)
+        }
+        .menuStyle(.borderlessButton)
+        .help(settings.binding(for: button, slot: slot)?.displayName ?? "未设置")
+    }
+
+    private func chooseApplication(for button: RemoteButton, slot: ButtonGestureSlot) {
+        let panel = NSOpenPanel()
+        panel.title = "选择要打开的应用"
+        panel.prompt = "选择应用"
+        panel.allowedFileTypes = ["app"]
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.treatsFilePackagesAsDirectories = false
+        if case let .openApplication(target) = settings.binding(for: button, slot: slot) {
+            panel.directoryURL = URL(fileURLWithPath: target.path).deletingLastPathComponent()
+        } else {
+            panel.directoryURL = URL(fileURLWithPath: "/Applications", isDirectory: true)
+        }
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            guard let target = ApplicationTarget.application(at: url) else {
+                let alert = NSAlert()
+                alert.messageText = "无法选择此应用"
+                alert.informativeText = "请选择有效的 .app 应用程序。"
+                alert.runModal()
+                return
+            }
+            setBinding(.openApplication(target), for: button, slot: slot)
+        }
+    }
+
+    private func setBinding(
+        _ binding: ButtonBinding?,
+        for button: RemoteButton,
+        slot: ButtonGestureSlot = .single
+    ) {
+        if button == .microphone, slot == .single, let binding {
             _ = model.setVoiceKeyBinding(binding)
         } else {
-            settings.setBinding(binding, for: button)
+            settings.setBinding(binding, for: button, slot: slot)
+        }
+    }
+
+    private var gestureTimingSection: some View {
+        HStack(alignment: .center, spacing: 16) {
+            Text("手势判定")
+                .font(.headline)
+
+            Spacer(minLength: 12)
+
+            compactTimingInput(
+                title: "双击间隔",
+                text: $doubleClickTimingText,
+                range: MultiActionTiming.minimumDoubleClickMs...MultiActionTiming.maximumDoubleClickMs,
+                currentValue: { settings.multiActionDoubleClickMs }
+            )
+
+            Divider().frame(height: 28)
+
+            compactTimingInput(
+                title: "长按时长",
+                text: $longPressTimingText,
+                range: MultiActionTiming.minimumLongPressMs...MultiActionTiming.maximumLongPressMs,
+                currentValue: { settings.multiActionLongPressMs }
+            )
+
+            Button(timingHasChanges ? "保存" : "已保存", action: saveGestureTiming)
+                .disabled(!timingHasChanges)
+                .frame(width: 58)
+
+            Button("恢复默认") {
+                settings.resetMultiActionTiming()
+                doubleClickTimingText = String(settings.multiActionDoubleClickMs)
+                longPressTimingText = String(settings.multiActionLongPressMs)
+            }
+        }
+        .onChange(of: settings.multiActionDoubleClickMs) { value in
+            doubleClickTimingText = String(value)
+        }
+        .onChange(of: settings.multiActionLongPressMs) { value in
+            longPressTimingText = String(value)
+        }
+    }
+
+    private var timingHasChanges: Bool {
+        doubleClickTimingText != String(settings.multiActionDoubleClickMs) ||
+            longPressTimingText != String(settings.multiActionLongPressMs)
+    }
+
+    private func saveGestureTiming() {
+        NSApp.keyWindow?.makeFirstResponder(nil)
+        let doubleClick = MultiActionTimingInput.committedValue(
+            from: doubleClickTimingText, fallback: settings.multiActionDoubleClickMs,
+            range: MultiActionTiming.minimumDoubleClickMs...MultiActionTiming.maximumDoubleClickMs
+        )
+        let longPress = MultiActionTimingInput.committedValue(
+            from: longPressTimingText, fallback: settings.multiActionLongPressMs,
+            range: MultiActionTiming.minimumLongPressMs...MultiActionTiming.maximumLongPressMs
+        )
+        let accepted = settings.setMultiActionTiming(
+            doubleClickMs: doubleClick, longPressMs: longPress
+        )
+        doubleClickTimingText = String(accepted.doubleClickMs)
+        longPressTimingText = String(accepted.longPressMs)
+    }
+
+    private func compactTimingInput(
+        title: String,
+        text: Binding<String>,
+        range: ClosedRange<Int>,
+        currentValue: @escaping () -> Int
+    ) -> some View {
+        return HStack(spacing: 6) {
+            Text(title)
+                .font(.callout)
+            GestureTimingTextField(
+                title: title, text: text, range: range,
+                currentValue: currentValue, onSubmit: saveGestureTiming
+            )
+            .frame(width: 64, height: 25)
+            Text("ms")
+                .foregroundColor(.secondary)
         }
     }
 
@@ -1201,6 +1431,8 @@ private struct RemoteControlDiagram: View {
     @Binding var selectedButton: RemoteButton
     let voiceActive: Bool
     let variant: XiaomiRemoteVariant
+    let diagramWidth: CGFloat
+    let diagramHeight: CGFloat
 
     var body: some View {
         VStack(spacing: 6) {
@@ -1229,7 +1461,7 @@ private struct RemoteControlDiagram: View {
                     }
                 }
             }
-            .frame(width: 210, height: 426)
+            .frame(width: diagramWidth, height: diagramHeight)
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -1302,8 +1534,8 @@ private struct RemoteControlDiagram: View {
                 .contentShape(RoundedRectangle(cornerRadius: 999, style: .continuous))
         }
         .buttonStyle(.plain)
-        .frame(width: 210 * width, height: 426 * height)
-        .position(x: 210 * x, y: 426 * y)
+        .frame(width: diagramWidth * width, height: diagramHeight * height)
+        .position(x: diagramWidth * x, y: diagramHeight * y)
         .help(button.displayName)
         .accessibilityLabel(Text(button.displayName))
     }
@@ -1330,8 +1562,8 @@ private struct RemoteControlDiagram: View {
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
-        .frame(width: 210 * width, height: 426 * height)
-        .position(x: 210 * x, y: 426 * y)
+        .frame(width: diagramWidth * width, height: diagramHeight * height)
+        .position(x: diagramWidth * x, y: diagramHeight * y)
         .help("语音键：默认硬件 Fn，也可录制自定义快捷键")
         .accessibilityLabel(Text("语音键"))
     }

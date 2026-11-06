@@ -1,0 +1,156 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1740" height="900" viewBox="0 0 1740 900">
+  <defs>
+    <style>
+      .title { font: 700 30px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; fill: #1d1d1f; }
+      .state { font: 700 22px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; fill: #1d1d1f; }
+      .body { font: 500 18px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; fill: #1d1d1f; }
+      .small { font: 500 14px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; fill: #6e6e73; }
+      .button { font: 600 16px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; fill: #1d1d1f; }
+      .tag { font: 600 13px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; fill: #075ea8; }
+      .note { font: 500 16px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; fill: #505055; }
+    </style>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#000000" flood-opacity="0.08"/>
+    </filter>
+  </defs>
+
+  <rect width="1740" height="900" fill="#f5f5f7"/>
+  <text x="70" y="66" class="title">“按键”页面内的按键手势：三种界面状态</text>
+  <text x="70" y="101" class="note">保留现有单击选择器；多动作仅在用户需要时展开。</text>
+
+  <!-- State A -->
+  <rect x="60" y="135" width="520" height="650" rx="22" fill="#ffffff" filter="url(#shadow)"/>
+  <text x="92" y="180" class="state">A. 默认状态</text>
+  <text x="92" y="207" class="small">未配置多动作，保持当前页面结构</text>
+  <line x1="92" y1="229" x2="548" y2="229" stroke="#e5e5ea"/>
+  <text x="92" y="268" class="body" font-weight="700">动作映射</text>
+
+  <rect x="88" y="289" width="464" height="74" rx="13" fill="#f2f2f4"/>
+  <rect x="103" y="305" width="56" height="42" rx="21" fill="#e3e3e6"/>
+  <text x="131" y="332" text-anchor="middle" class="button">电源</text>
+  <text x="174" y="319" class="body">电源键</text>
+  <text x="174" y="343" class="small">HID 0x66</text>
+  <rect x="368" y="304" width="164" height="44" rx="9" fill="#dedee2"/>
+  <text x="384" y="332" class="button">Escape</text>
+  <path d="M510 320 l6 6 l-6 6" fill="none" stroke="#55555a" stroke-width="2"/>
+
+  <rect x="88" y="377" width="464" height="92" rx="13" fill="#eef6ff" stroke="#0a84ff" stroke-width="1.5"/>
+  <rect x="103" y="394" width="56" height="42" rx="21" fill="#0a84ff"/>
+  <text x="131" y="421" text-anchor="middle" font-family="-apple-system, PingFang SC" font-size="15" font-weight="700" fill="#ffffff">返回</text>
+  <text x="174" y="408" class="body">返回键</text>
+  <text x="174" y="432" class="small">HID 0xF1</text>
+  <rect x="302" y="393" width="154" height="44" rx="9" fill="#dedee2"/>
+  <text x="316" y="421" class="button">Delete（退格）</text>
+  <rect x="465" y="393" width="72" height="44" rx="9" fill="#ffffff" stroke="#c7c7cc"/>
+  <text x="501" y="421" text-anchor="middle" class="button">手势…</text>
+
+  <rect x="88" y="483" width="464" height="74" rx="13" fill="#f2f2f4"/>
+  <rect x="103" y="499" width="56" height="42" rx="21" fill="#e3e3e6"/>
+  <text x="131" y="526" text-anchor="middle" class="button">上</text>
+  <text x="174" y="513" class="body">上键</text>
+  <text x="174" y="537" class="small">HID 0x52</text>
+  <rect x="368" y="498" width="164" height="44" rx="9" fill="#dedee2"/>
+  <text x="384" y="526" class="button">方向上</text>
+
+  <rect x="88" y="579" width="464" height="58" rx="13" fill="#fafafa" stroke="#e5e5ea"/>
+  <text x="108" y="615" class="body">手势判定</text>
+  <path d="M522 602 l7 7 l-7 7" fill="none" stroke="#6e6e73" stroke-width="2"/>
+  <text x="92" y="690" class="note">要点：未配置时没有额外标记，</text>
+  <text x="92" y="717" class="note">用户仍然只需选择一个动作。</text>
+
+  <!-- State B -->
+  <rect x="610" y="135" width="520" height="650" rx="22" fill="#ffffff" filter="url(#shadow)"/>
+  <text x="642" y="180" class="state">B. 已配置、折叠</text>
+  <text x="642" y="207" class="small">列表保持紧凑，同时提示存在额外模式</text>
+  <line x1="642" y1="229" x2="1098" y2="229" stroke="#e5e5ea"/>
+  <text x="642" y="268" class="body" font-weight="700">动作映射</text>
+
+  <rect x="638" y="289" width="464" height="74" rx="13" fill="#f2f2f4"/>
+  <rect x="653" y="305" width="56" height="42" rx="21" fill="#e3e3e6"/>
+  <text x="681" y="332" text-anchor="middle" class="button">电源</text>
+  <text x="724" y="319" class="body">电源键</text>
+  <text x="724" y="343" class="small">HID 0x66</text>
+  <rect x="918" y="304" width="164" height="44" rx="9" fill="#dedee2"/>
+  <text x="934" y="332" class="button">Escape</text>
+
+  <rect x="638" y="377" width="464" height="104" rx="13" fill="#eef6ff" stroke="#0a84ff" stroke-width="1.5"/>
+  <rect x="653" y="394" width="56" height="42" rx="21" fill="#0a84ff"/>
+  <text x="681" y="421" text-anchor="middle" font-family="-apple-system, PingFang SC" font-size="15" font-weight="700" fill="#ffffff">返回</text>
+  <text x="724" y="408" class="body">返回键</text>
+  <text x="724" y="432" class="small">HID 0xF1</text>
+  <rect x="852" y="393" width="154" height="44" rx="9" fill="#dedee2"/>
+  <text x="866" y="421" class="button">Delete（退格）</text>
+  <rect x="1015" y="393" width="72" height="44" rx="9" fill="#ffffff" stroke="#0a84ff"/>
+  <text x="1051" y="421" text-anchor="middle" class="button">手势…</text>
+  <rect x="724" y="446" width="52" height="22" rx="11" fill="#d9ecff"/>
+  <text x="750" y="462" text-anchor="middle" class="tag">双击</text>
+  <rect x="783" y="446" width="52" height="22" rx="11" fill="#d9ecff"/>
+  <text x="809" y="462" text-anchor="middle" class="tag">长按</text>
+
+  <rect x="638" y="495" width="464" height="74" rx="13" fill="#f2f2f4"/>
+  <rect x="653" y="511" width="56" height="42" rx="21" fill="#e3e3e6"/>
+  <text x="681" y="538" text-anchor="middle" class="button">上</text>
+  <text x="724" y="525" class="body">上键</text>
+  <text x="724" y="549" class="small">HID 0x52</text>
+  <rect x="918" y="510" width="164" height="44" rx="9" fill="#dedee2"/>
+  <text x="934" y="538" class="button">方向上</text>
+
+  <rect x="638" y="591" width="464" height="58" rx="13" fill="#fafafa" stroke="#e5e5ea"/>
+  <text x="658" y="627" class="body">手势判定</text>
+  <path d="M1072 614 l7 7 l-7 7" fill="none" stroke="#6e6e73" stroke-width="2"/>
+  <text x="642" y="690" class="note">要点：折叠后只显示模式标签，</text>
+  <text x="642" y="717" class="note">不把三个动作全部塞进列表行。</text>
+
+  <!-- State C -->
+  <rect x="1160" y="135" width="520" height="650" rx="22" fill="#ffffff" filter="url(#shadow)"/>
+  <text x="1192" y="180" class="state">C. 行内展开</text>
+  <text x="1192" y="207" class="small">在原页面编辑，一次只展开一个按键</text>
+  <line x1="1192" y1="229" x2="1648" y2="229" stroke="#e5e5ea"/>
+  <text x="1192" y="268" class="body" font-weight="700">动作映射</text>
+
+  <rect x="1188" y="289" width="464" height="74" rx="13" fill="#f2f2f4"/>
+  <rect x="1203" y="305" width="56" height="42" rx="21" fill="#e3e3e6"/>
+  <text x="1231" y="332" text-anchor="middle" class="button">电源</text>
+  <text x="1274" y="319" class="body">电源键</text>
+  <text x="1274" y="343" class="small">HID 0x66</text>
+  <rect x="1468" y="304" width="164" height="44" rx="9" fill="#dedee2"/>
+  <text x="1484" y="332" class="button">Escape</text>
+
+  <rect x="1188" y="377" width="464" height="74" rx="13" fill="#eef6ff" stroke="#0a84ff" stroke-width="1.5"/>
+  <rect x="1203" y="393" width="56" height="42" rx="21" fill="#0a84ff"/>
+  <text x="1231" y="420" text-anchor="middle" font-family="-apple-system, PingFang SC" font-size="15" font-weight="700" fill="#ffffff">返回</text>
+  <text x="1274" y="407" class="body">返回键</text>
+  <text x="1274" y="431" class="small">HID 0xF1</text>
+  <rect x="1402" y="392" width="154" height="44" rx="9" fill="#dedee2"/>
+  <text x="1416" y="420" class="button">Delete（退格）</text>
+  <rect x="1565" y="392" width="72" height="44" rx="9" fill="#ffffff" stroke="#0a84ff"/>
+  <text x="1601" y="420" text-anchor="middle" class="button">收起 ︿</text>
+
+  <rect x="1188" y="462" width="464" height="236" rx="15" fill="#f7fbff" stroke="#b7d9fa"/>
+  <text x="1210" y="494" class="button">按键手势</text>
+  <text x="1210" y="521" class="small">不同按法分别执行以下动作</text>
+  <line x1="1210" y1="536" x2="1630" y2="536" stroke="#d6e9fb"/>
+
+  <text x="1210" y="573" class="body">单击</text>
+  <rect x="1343" y="548" width="287" height="42" rx="9" fill="#e6e6e9"/>
+  <text x="1360" y="575" class="button">Delete（退格）</text>
+  <path d="M1606 563 l6 6 l-6 6" fill="none" stroke="#55555a" stroke-width="2"/>
+
+  <text x="1210" y="623" class="body">双击</text>
+  <rect x="1343" y="598" width="287" height="42" rx="9" fill="#e6e6e9"/>
+  <text x="1360" y="625" class="button">⌃C</text>
+  <path d="M1606 613 l6 6 l-6 6" fill="none" stroke="#55555a" stroke-width="2"/>
+
+  <text x="1210" y="673" class="body">长按</text>
+  <rect x="1343" y="648" width="287" height="42" rx="9" fill="#ffffff" stroke="#c7c7cc"/>
+  <text x="1360" y="675" class="small">未设置</text>
+  <path d="M1606 663 l6 6 l-6 6" fill="none" stroke="#55555a" stroke-width="2"/>
+
+  <rect x="1188" y="712" width="464" height="48" rx="13" fill="#fafafa" stroke="#e5e5ea"/>
+  <text x="1208" y="742" class="body">手势判定</text>
+  <path d="M1622 729 l7 7 l-7 7" fill="none" stroke="#6e6e73" stroke-width="2"/>
+
+  <rect x="60" y="820" width="1620" height="48" rx="14" fill="#e8f3ff"/>
+  <circle cx="88" cy="844" r="10" fill="#0a84ff"/>
+  <text x="112" y="850" class="note">推荐交互：默认不增加复杂度；配置后可识别；编辑时不离开当前“按键”页面。</text>
+</svg>

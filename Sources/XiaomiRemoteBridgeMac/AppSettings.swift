@@ -82,6 +82,9 @@ final class AppSettings: ObservableObject {
         static let legacyExclusiveHID = "exclusiveHID"
         static let buttonBindings = "buttonBindings"
         static let buttonBindingsV2 = "buttonBindingsV2"
+        static let multiActionBindingsV3 = "multiActionBindingsV3"
+        static let multiActionDoubleClickMs = "multiActionDoubleClickMs"
+        static let multiActionLongPressMs = "multiActionLongPressMs"
         static let peripheralIdentifier = "peripheralIdentifier"
         static let localFnMicEnabled = "localFnMicEnabled"
         static let localMicInputUID = "localMicInputUID"
@@ -139,8 +142,16 @@ final class AppSettings: ObservableObject {
         didSet { defaults.set(launchAtLoginEnabled, forKey: Keys.launchAtLoginEnabled) }
     }
 
-    @Published var buttonBindings: [RemoteButton: ButtonBinding] {
+    @Published private(set) var multiActionBindings: [RemoteButton: MultiActionButtonBinding] {
         didSet { saveBindings() }
+    }
+
+    @Published private(set) var multiActionDoubleClickMs: Int {
+        didSet { defaults.set(multiActionDoubleClickMs, forKey: Keys.multiActionDoubleClickMs) }
+    }
+
+    @Published private(set) var multiActionLongPressMs: Int {
+        didSet { defaults.set(multiActionLongPressMs, forKey: Keys.multiActionLongPressMs) }
     }
 
     var peripheralIdentifier: UUID? {
@@ -180,27 +191,67 @@ final class AppSettings: ObservableObject {
         launchAtLoginEnabled = defaults.object(forKey: Keys.launchAtLoginEnabled) == nil
             ? true
             : defaults.bool(forKey: Keys.launchAtLoginEnabled)
-        if let data = defaults.data(forKey: Keys.buttonBindingsV2),
-           let decoded = try? JSONDecoder().decode([String: ButtonBinding].self, from: data) {
-            buttonBindings = Self.defaultBindings.merging(
+        let loadedCurrentBindings: Bool
+        if let data = defaults.data(forKey: Keys.multiActionBindingsV3),
+           let decoded = try? JSONDecoder().decode([String: MultiActionButtonBinding].self, from: data) {
+            loadedCurrentBindings = true
+            multiActionBindings = Self.defaultMultiActionBindings.merging(
                 Dictionary(uniqueKeysWithValues: decoded.compactMap { key, value in
                     RemoteButton(rawValue: key).map { ($0, value) }
                 })
             ) { _, saved in saved }
-        } else if let data = defaults.data(forKey: Keys.buttonBindings),
-                  let decoded = try? JSONDecoder().decode([String: ButtonAction].self, from: data) {
-            buttonBindings = Self.defaultBindings.merging(
-                Dictionary(uniqueKeysWithValues: decoded.compactMap { key, value in
-                    RemoteButton(rawValue: key).map { ($0, .preset(value)) }
-                })
-            ) { _, saved in saved }
         } else {
-            buttonBindings = Self.defaultBindings
+            loadedCurrentBindings = false
+            let singleBindings: [RemoteButton: ButtonBinding]
+            if let data = defaults.data(forKey: Keys.buttonBindingsV2),
+               let decoded = try? JSONDecoder().decode([String: ButtonBinding].self, from: data) {
+                singleBindings = Self.defaultBindings.merging(
+                    Dictionary(uniqueKeysWithValues: decoded.compactMap { key, value in
+                        RemoteButton(rawValue: key).map { ($0, value) }
+                    })
+                ) { _, saved in saved }
+            } else if let data = defaults.data(forKey: Keys.buttonBindings),
+                      let decoded = try? JSONDecoder().decode([String: ButtonAction].self, from: data) {
+                singleBindings = Self.defaultBindings.merging(
+                    Dictionary(uniqueKeysWithValues: decoded.compactMap { key, value in
+                        RemoteButton(rawValue: key).map { ($0, .preset(value)) }
+                    })
+                ) { _, saved in saved }
+            } else {
+                singleBindings = Self.defaultBindings
+            }
+            multiActionBindings = Dictionary(uniqueKeysWithValues: singleBindings.map { button, binding in
+                (button, MultiActionButtonBinding(single: binding))
+            })
         }
+
+        let timing = MultiActionTiming.normalized(
+            doubleClickMs: defaults.object(forKey: Keys.multiActionDoubleClickMs) == nil
+                ? MultiActionTiming.defaultDoubleClickMs
+                : defaults.integer(forKey: Keys.multiActionDoubleClickMs),
+            longPressMs: defaults.object(forKey: Keys.multiActionLongPressMs) == nil
+                ? MultiActionTiming.defaultLongPressMs
+                : defaults.integer(forKey: Keys.multiActionLongPressMs)
+        )
+        multiActionDoubleClickMs = timing.doubleClickMs
+        multiActionLongPressMs = timing.longPressMs
+        // Existing local builds may already have written a newer action into V2.
+        // Repair that projection on launch without rewriting the canonical V3.
+        if loadedCurrentBindings { saveLegacyBindings() }
     }
 
     func binding(for button: RemoteButton) -> ButtonBinding {
-        buttonBindings[button] ?? .preset(.disabled)
+        multiActionBinding(for: button).single
+    }
+
+    func multiActionBinding(for button: RemoteButton) -> MultiActionButtonBinding {
+        multiActionBindings[button]
+            ?? Self.defaultMultiActionBindings[button]
+            ?? MultiActionButtonBinding(single: .preset(.disabled))
+    }
+
+    func binding(for button: RemoteButton, slot: ButtonGestureSlot) -> ButtonBinding? {
+        multiActionBinding(for: button).binding(for: slot)
     }
 
     func action(for button: RemoteButton) -> ButtonAction {
@@ -209,7 +260,13 @@ final class AppSettings: ObservableObject {
     }
 
     func setBinding(_ binding: ButtonBinding, for button: RemoteButton) {
-        buttonBindings[button] = binding
+        setBinding(binding, for: button, slot: .single)
+    }
+
+    func setBinding(_ binding: ButtonBinding?, for button: RemoteButton, slot: ButtonGestureSlot) {
+        var value = multiActionBinding(for: button)
+        value.setBinding(binding, for: slot)
+        multiActionBindings[button] = value
     }
 
     func setAction(_ action: ButtonAction, for button: RemoteButton) {
@@ -217,12 +274,62 @@ final class AppSettings: ObservableObject {
     }
 
     func resetBindings() {
-        buttonBindings = Self.defaultBindings
+        multiActionBindings = Self.defaultMultiActionBindings
+    }
+
+    /// Commit both drafts through one policy. A long-only edit keeps the chosen
+    /// long threshold by lowering double click if needed. A double-only edit,
+    /// or conflicting edits to both values, keeps double click and raises long.
+    @discardableResult
+    func setMultiActionTiming(
+        doubleClickMs: Int, longPressMs: Int
+    ) -> (doubleClickMs: Int, longPressMs: Int) {
+        let clampedDouble = min(
+            max(doubleClickMs, MultiActionTiming.minimumDoubleClickMs),
+            MultiActionTiming.maximumDoubleClickMs
+        )
+        let clampedLong = min(
+            max(longPressMs, MultiActionTiming.minimumLongPressMs),
+            MultiActionTiming.maximumLongPressMs
+        )
+        let longOnlyEdit = clampedDouble == multiActionDoubleClickMs &&
+            clampedLong != multiActionLongPressMs
+        let adjustedDouble = longOnlyEdit && clampedLong <= clampedDouble
+            ? max(MultiActionTiming.minimumDoubleClickMs, clampedLong - MultiActionTiming.minimumGapMs)
+            : clampedDouble
+        let timing = MultiActionTiming.normalized(
+            doubleClickMs: adjustedDouble,
+            longPressMs: clampedLong
+        )
+        if multiActionDoubleClickMs != timing.doubleClickMs {
+            multiActionDoubleClickMs = timing.doubleClickMs
+        }
+        if multiActionLongPressMs != timing.longPressMs {
+            multiActionLongPressMs = timing.longPressMs
+        }
+        return timing
+    }
+
+    func resetMultiActionTiming() {
+        setMultiActionTiming(
+            doubleClickMs: MultiActionTiming.defaultDoubleClickMs,
+            longPressMs: MultiActionTiming.defaultLongPressMs
+        )
     }
 
     private func saveBindings() {
-        let raw = Dictionary(uniqueKeysWithValues: buttonBindings.map { ($0.key.rawValue, $0.value) })
+        let raw = Dictionary(uniqueKeysWithValues: multiActionBindings.map { ($0.key.rawValue, $0.value) })
         if let data = try? JSONEncoder().encode(raw) {
+            defaults.set(data, forKey: Keys.multiActionBindingsV3)
+        }
+        saveLegacyBindings()
+    }
+
+    private func saveLegacyBindings() {
+        let singleRaw = Dictionary(uniqueKeysWithValues: multiActionBindings.map {
+            ($0.key.rawValue, $0.value.single.legacyV2Binding)
+        })
+        if let data = try? JSONEncoder().encode(singleRaw) {
             defaults.set(data, forKey: Keys.buttonBindingsV2)
         }
     }
@@ -242,4 +349,10 @@ final class AppSettings: ObservableObject {
         .menu: .preset(.contextMenu),
         .tv: .preset(.appSwitcher),
     ]
+
+    static let defaultMultiActionBindings = Dictionary(
+        uniqueKeysWithValues: defaultBindings.map { button, binding in
+            (button, MultiActionButtonBinding(single: binding))
+        }
+    )
 }

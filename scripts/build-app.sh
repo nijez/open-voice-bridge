@@ -109,7 +109,7 @@ test -d "$SPARKLE_VERSION_DIR/Updater.app"
 sign_sparkle_components() {
   local identity="$1"
   shift
-  local common_args=(--force --options runtime --sign "$identity" "$@")
+  local common_args=(--force --sign "$identity" "$@")
 
   codesign "${common_args[@]}" \
     "$SPARKLE_VERSION_DIR/XPCServices/Installer.xpc"
@@ -122,7 +122,7 @@ sign_sparkle_components() {
 
 if [[ "$RELEASE_SIGN" -eq 1 ]]; then
   print "codesign identity: Developer ID Application (release)"
-  sign_sparkle_components "$LOCAL_SIGNING_IDENTITY" --timestamp
+  sign_sparkle_components "$LOCAL_SIGNING_IDENTITY" --options runtime --timestamp
   codesign \
     --force \
     --entitlements "$ENTITLEMENTS" \
@@ -136,13 +136,12 @@ elif rg -Fq "\"$LOCAL_SIGNING_IDENTITY\"" <<<"$AVAILABLE_SIGNING_IDENTITIES"; th
   codesign \
     --force \
     --entitlements "$ENTITLEMENTS" \
-    --options runtime \
     --sign "$LOCAL_SIGNING_IDENTITY" \
     "$APP_DIR"
 else
   print "codesign identity: ad-hoc fallback"
   sign_sparkle_components -
-  codesign --force --entitlements "$ENTITLEMENTS" --options runtime --sign - "$APP_DIR"
+  codesign --force --entitlements "$ENTITLEMENTS" --sign - "$APP_DIR"
 fi
 codesign --verify --deep --strict "$APP_DIR"
 

@@ -15,6 +15,12 @@ xcrun swiftc \
   "$ROOT/Sources/XiaomiRemoteBridgeMac/DeviceProfileCatalog.swift" \
   "$ROOT/Sources/XiaomiRemoteBridgeMac/BluetoothLifecycle.swift" \
   "$ROOT/Sources/XiaomiRemoteBridgeMac/RemoteButtons.swift" \
+  "$ROOT/Sources/XiaomiRemoteBridgeMac/ApplicationLauncher.swift" \
+  "$ROOT/Sources/XiaomiRemoteBridgeMac/GestureTimingTextField.swift" \
+  "$ROOT/Sources/XiaomiRemoteBridgeMac/KeyboardInjector.swift" \
+  "$ROOT/Sources/XiaomiRemoteBridgeMac/KeyboardEventSuppressor.swift" \
+  "$ROOT/Sources/XiaomiRemoteBridgeMac/MultiActionButtonGesture.swift" \
+  "$ROOT/Sources/XiaomiRemoteBridgeMac/MultiActionRuntimeCoordinator.swift" \
   "$ROOT/Sources/XiaomiRemoteBridgeMac/AppSettings.swift" \
   "$ROOT/Sources/XiaomiRemoteBridgeMac/LaunchAtLoginManager.swift" \
   "$ROOT/Sources/XiaomiRemoteBridgeMac/VoiceFunctionKeyLatch.swift" \
@@ -22,11 +28,17 @@ xcrun swiftc \
   "$ROOT/Sources/XiaomiRemoteBridgeMac/LocalMicrophoneArbitration.swift" \
   "$ROOT/Sources/XiaomiRemoteBridgeMac/ExternalMicrophoneProfile.swift" \
   "$ROOT/Sources/XiaomiRemoteBridgeMac/RemoteVoiceFunctionMapper.swift" \
+  "$ROOT/Sources/XiaomiRemoteBridgeMac/RemoteButtonNativeMapper.swift" \
   "$ROOT/Sources/XiaomiRemoteBridgeMac/AppLogger.swift" \
   "$ROOT/Sources/XiaomiRemoteBridgeMac/TestTone.swift" \
   "$ROOT/Sources/XiaomiRemoteBridgeMac/UpdatePolicy.swift" \
   "$ROOT/Sources/XiaomiRemoteBridgeMac/AudioPathDiagnostics.swift" \
   "$ROOT/Tests/SelfTest/main.swift" \
+  "$ROOT/Tests/SelfTest/RemoteButtonNativeMappingTests.swift" \
+  "$ROOT/Tests/SelfTest/ApplicationLauncherTests.swift" \
+  "$ROOT/Tests/SelfTest/GestureTimingTextFieldTests.swift" \
+  "$ROOT/Tests/SelfTest/ButtonSettingsTests.swift" \
+  "$ROOT/Tests/SelfTest/GestureReviewRegressionTests.swift" \
   -o "$OUTPUT"
 OVB_DEVICE_PROFILES_DIR="$ROOT/device-profiles" "$OUTPUT"
 

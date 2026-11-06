@@ -58,14 +58,20 @@ private func hidInputReport(
 }
 
 final class HIDRemoteMonitor {
+    private enum NativeMappingState { case restored, pending, applied, restoreFailed }
+
     private let settings: AppSettings
     private let eventSuppressor = KeyboardEventSuppressor()
+    private let nativeMapper: RemoteButtonNativeMapper
+    private var nativeMappingState = NativeMappingState.restored
+    private var nativeMappingRetryToken: UInt64 = 0
     private var manager: IOHIDManager?
     private var lifecycle = RemoteDeviceLifecycle()
     private var activeDevice: IOHIDDevice?
     private var activeDeviceIsSeized = false
     private var activeUsages = Set<UInt16>()
     private var repeatTimers: [UInt16: DispatchSourceTimer] = [:]
+    private var multiActionHeldBindings: [UInt16: HeldButtonBinding] = [:]
     private var permissionMonitor: DispatchSourceTimer?
     private var voiceKeyIsDown = false
     private var heldVoiceChord = HeldKeyChordLatch()
@@ -77,6 +83,22 @@ final class HIDRemoteMonitor {
     /// actions and runs no repeats. Independent of `customMappingEnabled`, which
     /// governs whether the monitor reads at all.
     private var actionsSuppressed = false
+    private lazy var multiActionCoordinator = MultiActionRuntimeCoordinator(
+        isUsageActive: { [weak self] usage in
+            self?.activeUsages.contains(usage) == true
+        },
+        deliverOutputs: { [weak self] context, outputs in
+            self?.deliverMultiActionOutputs(
+                outputs,
+                usage: context.usage,
+                button: context.button,
+                binding: context.binding
+            ) ?? false
+        },
+        deliveryDidFail: { [weak self] in
+            self?.failClosedForDeliveryError()
+        }
+    )
     private(set) var status = "按键映射未启用"
     var onStatus: ((String) -> Void)?
     /// Emits the RC003 microphone (F5) key edge so the local-mic arbiter has a
@@ -130,19 +152,35 @@ final class HIDRemoteMonitor {
     func setActionsSuppressed(_ suppressed: Bool) {
         guard suppressed != actionsSuppressed else { return }
         actionsSuppressed = suppressed
-        guard suppressed else { return }
+        guard suppressed else {
+            if let activeDevice, !activeDeviceIsSeized,
+               let generation = lifecycle.activeGeneration {
+                beginNativeMapping(to: activeDevice, generation: generation)
+            }
+            return
+        }
+        cancelNativeMappingRetry()
         repeatTimers.values.forEach { $0.cancel() }
         repeatTimers.removeAll()
+        resetMultiActionRuntimes()
         releaseHeldVoiceChord()
-        // Forget held usages so a later release does not try to re-arm the
-        // suppressor, and so no repeat can resume. Injected key/system events are
-        // atomic down+up pairs, so there is no held synthetic key to release.
+        // The reset above cancels pending gestures and balances held output.
+        // Forget physical usages so a later release
+        // cannot re-arm one-shot suppression or resume a cancelled repeat.
         activeUsages.removeAll()
+        restoreNativeMapping()
+        if nativeMappingState == .restoreFailed {
+            updateStatus("RC003 原生按键映射恢复失败；请重新连接遥控器")
+        }
         AppLogger.shared.write("HID ACTIONS suppressed")
     }
 
-    init(settings: AppSettings) {
+    init(
+        settings: AppSettings,
+        nativeMapper: RemoteButtonNativeMapper = RemoteButtonNativeMapper()
+    ) {
         self.settings = settings
+        self.nativeMapper = nativeMapper
     }
 
     static var inputMonitoringAccess: IOHIDAccessType {
@@ -167,6 +205,10 @@ final class HIDRemoteMonitor {
         defer {
             reconfiguring = false
             syncReaderHealth()
+        }
+        guard nativeMappingState == .restored else {
+            updateStatus("RC003 原生按键映射恢复失败；请重新连接遥控器")
+            return
         }
         guard settings.customMappingEnabled else {
             updateStatus("按键由 macOS 原生处理")
@@ -236,13 +278,16 @@ final class HIDRemoteMonitor {
     }
 
     func stop() {
+        cancelNativeMappingRetry()
         permissionMonitor?.cancel()
         permissionMonitor = nil
         repeatTimers.values.forEach { $0.cancel() }
         repeatTimers.removeAll()
+        resetMultiActionRuntimes()
         activeUsages.removeAll()
         releaseHeldVoiceChord()
         forceReleaseVoiceKey()
+        restoreNativeMapping()
         eventSuppressor.stop()
         if let activeDevice {
             IOHIDDeviceClose(activeDevice, IOOptionBits(kIOHIDOptionsTypeNone))
@@ -326,22 +371,138 @@ final class HIDRemoteMonitor {
             // double-click so a gesture straddling a reconnect cannot be completed
             // by edges from two different device generations.
             onGestureInvalidate?()
-            if seized {
-                updateStatus("RC003 按键映射已连接（独占模式）")
-                AppLogger.shared.write("HID CONNECTED mode=seized")
-            } else {
-                let suffix = eventSuppressor.isRunning ? "兼容模式" : "兼容模式；系统原动作可能保留"
-                updateStatus("RC003 按键映射已连接（\(suffix)）")
-                AppLogger.shared.write("HID CONNECTED mode=monitored")
+            if !seized && !actionsSuppressed,
+               let generation = lifecycle.activeGeneration {
+                beginNativeMapping(to: device, generation: generation)
+                return
             }
-            // A successful match keeps the (already-open) pipeline healthy, so this
-            // is a no-op flip; call it for consistency with the health model.
-            syncReaderHealth()
+            reportConnected()
         }
+    }
+
+    private func beginNativeMapping(to device: IOHIDDevice, generation: UInt64) {
+        cancelNativeMappingRetry()
+        // A disappearing service may outlive its removal callback briefly. Clear
+        // any prior-generation rollback entry before adopting a new service.
+        guard nativeMapper.restore() else {
+            nativeMappingState = .restoreFailed
+            failNativeMapping(generation: generation, token: nativeMappingRetryToken, reason: "restore")
+            return
+        }
+        guard let location = IOHIDDeviceGetProperty(device, kIOHIDLocationIDKey as CFString) as? NSNumber else {
+            nativeMappingState = .restoreFailed
+            failNativeMapping(generation: generation, token: nativeMappingRetryToken, reason: "missing_location")
+            return
+        }
+        nativeMappingState = .pending
+        let token = nativeMappingRetryToken
+        attemptNativeMapping(
+            to: device,
+            locationID: location.uint64Value,
+            generation: generation,
+            attempt: 0,
+            token: token
+        )
+    }
+
+    private func attemptNativeMapping(
+        to device: IOHIDDevice,
+        locationID: UInt64,
+        generation: UInt64,
+        attempt: Int,
+        token: UInt64
+    ) {
+        guard nativeMappingAttemptIsCurrent(device: device, generation: generation, token: token) else {
+            return
+        }
+        switch nativeMapper.applyResult(
+            locationID: locationID,
+            includeHardwareVoiceMapping: shouldMapVoiceToHardwareFn
+        ) {
+        case .applied:
+            nativeMappingState = .applied
+            reportConnected()
+        case .failed:
+            nativeMappingState = .restoreFailed
+            failNativeMapping(generation: generation, token: token, reason: "safety_failure")
+        case .serviceNotReady:
+            let delay = RemoteButtonNativeMappingRetryPolicy.delay(afterAttempt: attempt)
+            nativeMappingState = .pending
+            updateStatus("正在等待 RC003 系统按键服务")
+            AppLogger.shared.write(
+                "HID NATIVE MAPPING waiting attempt=\(attempt + 1) delay_ms=\(Int(delay * 1_000))"
+            )
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.attemptNativeMapping(
+                    to: device,
+                    locationID: locationID,
+                    generation: generation,
+                    attempt: attempt + 1,
+                    token: token
+                )
+            }
+        }
+    }
+
+    private var shouldMapVoiceToHardwareFn: Bool {
+        if case .hardwareFn = settings.binding(for: .microphone) { return true }
+        return false
+    }
+
+    private func nativeMappingAttemptIsCurrent(
+        device: IOHIDDevice,
+        generation: UInt64,
+        token: UInt64
+    ) -> Bool {
+        guard token == nativeMappingRetryToken,
+              manager != nil,
+              settings.customMappingEnabled,
+              !actionsSuppressed,
+              !activeDeviceIsSeized,
+              lifecycle.activeGeneration == generation,
+              let activeDevice
+        else { return false }
+        return CFEqual(activeDevice, device)
+    }
+
+    private func failNativeMapping(generation: UInt64, token: UInt64, reason: String) {
+        // Never tear down IOHIDManager from inside its own device-match callback.
+        DispatchQueue.main.async { [weak self] in
+            guard let self,
+                  token == self.nativeMappingRetryToken,
+                  self.lifecycle.activeGeneration == generation
+            else { return }
+            AppLogger.shared.write("HID NATIVE MAPPING failed reason=\(reason)")
+            self.stop()
+            self.updateStatus("无法安全屏蔽 RC003 原生按键；已停止自定义映射")
+        }
+    }
+
+    private func cancelNativeMappingRetry() {
+        nativeMappingRetryToken &+= 1
+    }
+
+    private func reportConnected() {
+        if activeDeviceIsSeized {
+            updateStatus("RC003 按键映射已连接（独占模式）")
+            AppLogger.shared.write("HID CONNECTED mode=seized")
+        } else {
+            let suffix = actionsSuppressed ? "兼容模式；原生按键已恢复" : "兼容模式；设备级按键屏蔽"
+            updateStatus("RC003 按键映射已连接（\(suffix)）")
+            AppLogger.shared.write("HID CONNECTED mode=monitored")
+        }
+        // A successful match keeps the (already-open) pipeline healthy, so this
+        // is a no-op flip; call it for consistency with the health model.
+        syncReaderHealth()
+    }
+
+    private func restoreNativeMapping() {
+        nativeMappingState = nativeMapper.restore() ? .restored : .restoreFailed
     }
 
     fileprivate func deviceDidRemove(device: IOHIDDevice) {
         guard let activeDevice, CFEqual(activeDevice, device) else { return }
+        cancelNativeMappingRetry()
         // Invalidate the device generation FIRST so any late/queued input report
         // tagged with it is dropped, THEN force-release: this invalidates the
         // double-click gesture (even when no key is held, since this is a generation
@@ -355,6 +516,8 @@ final class HIDRemoteMonitor {
         forceReleaseVoiceKey()
         repeatTimers.values.forEach { $0.cancel() }
         repeatTimers.removeAll()
+        resetMultiActionRuntimes()
+        restoreNativeMapping()
         updateStatus("RC003 按键设备已断开")
         AppLogger.shared.write("HID DISCONNECTED")
         // The manager stays open and keeps watching for the RC003 to return, so
@@ -393,66 +556,231 @@ final class HIDRemoteMonitor {
         // Bridge runtime disabled: the edge above still flows, but inject no
         // ordinary key/mouse/system action and start no repeat.
         guard !actionsSuppressed else { return }
+        guard activeDeviceIsSeized || nativeMappingState == .applied else { return }
 
         for usage in pressed.sorted() {
             guard let button = RemoteButton.usageMap[usage] else { continue }
-            let binding = settings.binding(for: button)
-            if !activeDeviceIsSeized {
+            if multiActionCoordinator.resumeDeferredHold(for: usage) {
+                AppLogger.shared.write(
+                    "HID MULTI button=\(button.rawValue) firmware_repeat=merged"
+                )
+                continue
+            }
+
+            // Ordinary native events are discarded at the device layer. Avoid
+            // consuming an identical key from the user's physical keyboard.
+            if !activeDeviceIsSeized && button == .microphone {
                 eventSuppressor.arm(button: button, edge: .down)
             }
-            let delivered: Bool
-            if button == .microphone, case let .shortcut(chord) = binding {
-                delivered = KeyboardInjector.send(chord, edge: .down)
-                if delivered { heldVoiceChord.press(chord) }
-            } else {
-                delivered = KeyboardInjector.send(binding)
-            }
-            if !delivered {
-                stop()
-                updateStatus("辅助功能权限已失效；已释放遥控器")
+
+            guard multiActionCoordinator.interruptPending(excluding: usage) else {
+                failClosedForDeliveryError()
                 return
             }
-            startRepeatIfNeeded(usage: usage, button: button, binding: binding)
-            AppLogger.shared.write("HID BUTTON down=\(button.rawValue) action=\(binding.displayName)")
+
+            let multiActionBinding = settings.multiActionBinding(for: button)
+            if button != .microphone {
+                guard multiActionCoordinator.handle(
+                    .down,
+                    usage: usage,
+                    button: button,
+                    binding: multiActionBinding,
+                    configuration: multiActionConfiguration(for: multiActionBinding)
+                ) else {
+                    failClosedForDeliveryError()
+                    return
+                }
+            } else {
+                let binding = multiActionBinding.single
+                let delivered: Bool
+                if button == .microphone, case let .shortcut(chord) = binding {
+                    delivered = KeyboardInjector.send(chord, edge: .down)
+                    if delivered { heldVoiceChord.press(chord) }
+                } else {
+                    delivered = KeyboardInjector.send(binding)
+                }
+                guard delivered else {
+                    failClosedForDeliveryError()
+                    return
+                }
+            }
+            AppLogger.shared.write(
+                "HID BUTTON down=\(button.rawValue) multi=\(multiActionBinding.hasAdditionalActions)"
+            )
         }
 
         for usage in released {
-            if !activeDeviceIsSeized, let button = RemoteButton.usageMap[usage] {
-                eventSuppressor.arm(button: button, edge: .up)
+            guard let button = RemoteButton.usageMap[usage] else { continue }
+            if multiActionCoordinator.hasRuntime(for: usage) {
+                if multiActionCoordinator.isHoldingOutput(for: usage) {
+                    multiActionCoordinator.deferHeldRelease(for: usage)
+                } else {
+                    let binding = settings.multiActionBinding(for: button)
+                    guard multiActionCoordinator.handle(
+                        .up,
+                        usage: usage,
+                        button: button,
+                        binding: binding,
+                        configuration: multiActionConfiguration(for: binding)
+                    ) else {
+                        failClosedForDeliveryError()
+                        return
+                    }
+                }
+            } else {
+                if !activeDeviceIsSeized && button == .microphone {
+                    eventSuppressor.arm(button: button, edge: .up)
+                }
+                if button == .microphone, !releaseHeldVoiceChord() {
+                    failClosedForDeliveryError()
+                    return
+                }
+                repeatTimers.removeValue(forKey: usage)?.cancel()
             }
-            if RemoteButton.usageMap[usage] == .microphone,
-               !releaseHeldVoiceChord() {
-                stop()
-                updateStatus("辅助功能权限已失效；已释放遥控器")
-                return
-            }
-            repeatTimers.removeValue(forKey: usage)?.cancel()
         }
     }
 
-    private func startRepeatIfNeeded(
+    private func multiActionConfiguration(
+        for binding: MultiActionButtonBinding
+    ) -> MultiActionGestureConfiguration {
+        MultiActionGestureConfiguration(
+            hasDoublePress: binding.doublePress != nil,
+            hasLongPress: binding.longPress != nil,
+            doubleClickMs: settings.multiActionDoubleClickMs,
+            longPressMs: settings.multiActionLongPressMs
+        )
+    }
+
+    private func deliverMultiActionOutputs(
+        _ outputs: [MultiActionGestureOutput],
         usage: UInt16,
         button: RemoteButton,
-        binding: ButtonBinding
-    ) {
-        let repeatable: Set<RemoteButton> = [
-            .up, .down, .left, .right, .back, .volumeUp, .volumeDown,
-        ]
-        guard repeatable.contains(button), !binding.isDisabled else { return }
+        binding: MultiActionButtonBinding
+    ) -> Bool {
+        HIDPermissionGate.deliverGestureOutputs(
+            outputs, permissionsAreValid: runtimePermissionsAreValid
+        ) { output in
+            switch output {
+            case .performSingle(let count):
+                guard deliver(binding.single, count: count) else { return false }
+                AppLogger.shared.write(
+                    "HID MULTI button=\(button.rawValue) gesture=single count=\(count)"
+                )
 
+            case .performDouble:
+                guard let doubleBinding = binding.doublePress,
+                      deliver(doubleBinding, count: 1)
+                else { return false }
+                AppLogger.shared.write(
+                    "HID MULTI button=\(button.rawValue) gesture=double"
+                )
+
+            case .beginSingleHold(let precedingTapCount):
+                guard deliver(binding.single, count: precedingTapCount),
+                      beginMultiActionHold(
+                          binding.single,
+                          usage: usage,
+                          button: button
+                      )
+                else { return false }
+                AppLogger.shared.write(
+                    "HID MULTI button=\(button.rawValue) " +
+                    "gesture=single_hold phase=begin preceding=\(precedingTapCount)"
+                )
+
+            case .beginLongHold:
+                guard let longBinding = binding.longPress,
+                      beginMultiActionHold(longBinding, usage: usage, button: button)
+                else { return false }
+                AppLogger.shared.write(
+                    "HID MULTI button=\(button.rawValue) gesture=long_hold phase=begin"
+                )
+
+            case .endHold:
+                repeatTimers.removeValue(forKey: usage)?.cancel()
+                if let heldBinding = multiActionHeldBindings[usage] {
+                    guard KeyboardInjector.endHold(heldBinding) else { return false }
+                    multiActionHeldBindings.removeValue(forKey: usage)
+                }
+                AppLogger.shared.write(
+                    "HID MULTI button=\(button.rawValue) gesture=hold phase=end"
+                )
+            }
+            return true
+        }
+    }
+
+    private func beginMultiActionHold(
+        _ binding: ButtonBinding,
+        usage: UInt16,
+        button: RemoteButton
+    ) -> Bool {
+        guard multiActionHeldBindings[usage] == nil else { return true }
+        let result = KeyboardInjector.beginHold(binding)
+        guard result.delivered else { return false }
+        if let heldBinding = result.heldBinding {
+            multiActionHeldBindings[usage] = heldBinding
+        }
+        if let heldBinding = result.heldBinding, heldBinding.supportsRepeat {
+            startHeldRepeat(
+                usage: usage,
+                button: button,
+                heldBinding: heldBinding
+            )
+        }
+        return true
+    }
+
+    private func deliver(_ binding: ButtonBinding, count: Int) -> Bool {
+        guard count > 0 else { return true }
+        for _ in 0..<count {
+            guard KeyboardInjector.send(binding) else { return false }
+        }
+        return true
+    }
+
+    private func resetMultiActionRuntimes() {
+        for context in multiActionCoordinator.reset() {
+            repeatTimers.removeValue(forKey: context.usage)?.cancel()
+            if let heldBinding = multiActionHeldBindings[context.usage] {
+                _ = KeyboardInjector.endHold(heldBinding)
+                multiActionHeldBindings.removeValue(forKey: context.usage)
+            }
+        }
+        multiActionHeldBindings.removeAll()
+    }
+
+    private func failClosedForDeliveryError() {
+        guard runtimePermissionsAreValid() else {
+            releaseForRevokedPermissions()
+            return
+        }
+        stop()
+        updateStatus("无法发送自定义按键；已释放遥控器")
+    }
+
+    private func startHeldRepeat(
+        usage: UInt16,
+        button: RemoteButton,
+        heldBinding: HeldButtonBinding
+    ) {
+        repeatTimers.removeValue(forKey: usage)?.cancel()
         let timer = DispatchSource.makeTimerSource(queue: .main)
-        let interval: DispatchTimeInterval = button == .back ? .milliseconds(50) : .milliseconds(100)
-        timer.schedule(deadline: .now() + .milliseconds(350), repeating: interval)
+        timer.schedule(
+            deadline: .now() + .milliseconds(Int(RemoteButtonRepeatTiming.initialDelayMs)),
+            repeating: .milliseconds(RemoteButtonRepeatTiming.intervalMs)
+        )
         timer.setEventHandler { [weak self] in
-            guard let self, self.activeUsages.contains(usage) else { return }
+            guard let self,
+                  self.multiActionCoordinator.hasRuntime(for: usage),
+                  self.multiActionHeldBindings[usage] == heldBinding,
+                  self.activeUsages.contains(usage)
+            else { return }
             guard self.runtimePermissionsAreValid() else {
                 self.releaseForRevokedPermissions()
                 return
             }
-            if !self.activeDeviceIsSeized {
-                self.eventSuppressor.arm(button: button, edge: .down)
-            }
-            if !KeyboardInjector.send(binding) {
+            if !KeyboardInjector.repeatHold(heldBinding) {
                 self.releaseForRevokedPermissions()
             }
         }
