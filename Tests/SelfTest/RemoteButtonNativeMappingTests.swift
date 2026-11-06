@@ -141,6 +141,29 @@ func runRemoteButtonNativeMappingTests(_ check: (Bool, String) -> Void) {
 
     do {
         let fixture = NativeMappingFixture()
+        fixture.mappings = []
+        let mapper = fixture.mapper()
+        check(
+            mapper.applyResult(
+                locationID: 7,
+                includeHardwareVoiceMapping: true
+            ) == .applied && fixture.ownership.ownsCombinedVoiceMapping(registryID: 42),
+            "native mapping: a combined write publishes ownership after its ledger is durable"
+        )
+        fixture.saveWorks = false
+        check(
+            !mapper.restore() && fixture.ownership.ownsCombinedVoiceMapping(registryID: 42),
+            "native mapping: a ledger-save failure retains in-memory ownership for retry"
+        )
+        fixture.saveWorks = true
+        check(
+            mapper.restore() && !fixture.ownership.ownsCombinedVoiceMapping(registryID: 42),
+            "native mapping: durable restoration releases in-memory ownership"
+        )
+    }
+
+    do {
+        let fixture = NativeMappingFixture()
         let mapper = fixture.mapper()
         check(mapper.apply(locationID: 7), "native mapping: initial service generation applies")
         fixture.registryID = 43
@@ -151,6 +174,36 @@ func runRemoteButtonNativeMappingTests(_ check: (Bool, String) -> Void) {
             "native mapping: a replacement RegistryID drops the vanished generation and adopts the live service"
         )
         check(mapper.restore(), "native mapping: replacement-service ownership remains recoverable")
+    }
+
+    do {
+        let fixture = NativeMappingFixture()
+        fixture.mappings = []
+        let mapper = fixture.mapper()
+        check(
+            mapper.applyResult(
+                locationID: 7,
+                includeHardwareVoiceMapping: true
+            ) == .applied,
+            "native mapping: service-replacement transaction starts with durable ownership"
+        )
+        fixture.registryID = 43
+        fixture.mappings = []
+        fixture.saveWorks = false
+        check(
+            mapper.applyResult(locationID: 7) == .failed &&
+                fixture.ownership.ownsCombinedVoiceMapping(registryID: 42) &&
+                fixture.savedRecords?.map(\.registryID) == [42] &&
+                fixture.writeCount == 1,
+            "native mapping: failed stale-ledger cleanup changes neither ownership nor the live replacement"
+        )
+        fixture.saveWorks = true
+        check(
+            mapper.applyResult(locationID: 7) == .applied &&
+                !fixture.ownership.ownsCombinedVoiceMapping(registryID: 42) &&
+                fixture.savedRecords?.map(\.registryID) == [43],
+            "native mapping: stale-ledger cleanup commits before adopting a replacement service"
+        )
     }
 
     check(

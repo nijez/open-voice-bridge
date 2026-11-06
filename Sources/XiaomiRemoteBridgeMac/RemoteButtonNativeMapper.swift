@@ -216,15 +216,22 @@ final class RemoteButtonNativeMapper {
             !presentRegistryIDs.contains($0.registryID)
         }
         if !staleRecords.isEmpty {
+            let retainedRecords = activeRecords.filter {
+                presentRegistryIDs.contains($0.registryID)
+            }
+            // Keep the persisted ledger and in-memory ownership as one
+            // transaction. If persistence fails, a later retry must still see
+            // the old generation as owned rather than letting another policy
+            // adopt one of our mappings as pre-existing user state.
+            guard save(retainedRecords) else {
+                log("HID NATIVE MAPPING apply_failed stale_ledger_clear")
+                return .failed
+            }
             for record in staleRecords {
                 pendingAcceptedWriteRegistryIDs.remove(record.registryID)
                 ownership.setCombinedVoiceMappingOwned(false, registryID: record.registryID)
             }
-            activeRecords.removeAll { !presentRegistryIDs.contains($0.registryID) }
-            guard save(activeRecords) else {
-                log("HID NATIVE MAPPING apply_failed stale_ledger_clear")
-                return .failed
-            }
+            activeRecords = retainedRecords
             log("HID NATIVE MAPPING service_replaced stale=\(staleRecords.count)")
         }
         let targets = present.filter { $0.locationID == locationID }
@@ -295,10 +302,10 @@ final class RemoteButtonNativeMapper {
         guard !records.isEmpty else { return true }
         guard let present = services() else { return false }
         var remaining: [RemoteButtonNativeMappingRecord] = []
+        var releasedRegistryIDs = Set<UInt64>()
         for record in records {
             guard let service = present.first(where: { $0.registryID == record.registryID }) else {
-                pendingAcceptedWriteRegistryIDs.remove(record.registryID)
-                ownership.setCombinedVoiceMappingOwned(false, registryID: record.registryID)
+                releasedRegistryIDs.insert(record.registryID)
                 continue
             }
             let desired = RemoteButtonNativeMappingPolicy.restoring(
@@ -313,16 +320,22 @@ final class RemoteButtonNativeMapper {
                     log("HID NATIVE MAPPING restore_pending result=\(result.logValue) registry=\(record.registryID)")
                     remaining.append(record)
                 } else {
-                    pendingAcceptedWriteRegistryIDs.remove(record.registryID)
-                    ownership.setCombinedVoiceMappingOwned(false, registryID: record.registryID)
+                    releasedRegistryIDs.insert(record.registryID)
                 }
             } else {
-                ownership.setCombinedVoiceMappingOwned(false, registryID: record.registryID)
+                releasedRegistryIDs.insert(record.registryID)
             }
         }
         let persisted = save(remaining)
+        if persisted {
+            for registryID in releasedRegistryIDs {
+                pendingAcceptedWriteRegistryIDs.remove(registryID)
+                ownership.setCombinedVoiceMappingOwned(false, registryID: registryID)
+            }
+        }
         let succeeded = persisted && remaining.isEmpty
-        log("HID NATIVE MAPPING restored=\(succeeded) pending=\(remaining.count)")
+        let pendingCount = persisted ? remaining.count : records.count
+        log("HID NATIVE MAPPING restored=\(succeeded) pending=\(pendingCount) ledger_saved=\(persisted)")
         return succeeded
     }
 
