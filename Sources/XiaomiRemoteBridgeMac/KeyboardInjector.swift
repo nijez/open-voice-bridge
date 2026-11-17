@@ -102,6 +102,9 @@ enum KeyboardInjector {
             guard let down = makeEvent(isDown: true),
                   let up = makeEvent(isDown: false)
             else { return false }
+            // A tap is complete after its key-up. Do not leave modifiers active
+            // in the system event stream and change the meaning of later keys.
+            up.flags = []
             down.post(tap: .cghidEventTap)
             up.post(tap: .cghidEventTap)
         }
@@ -118,16 +121,13 @@ enum KeyboardInjector {
     }
 
     private static func postKey(code: CGKeyCode, flags: CGEventFlags = []) {
-        guard let source = CGEventSource(stateID: .hidSystemState),
-              let down = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: true),
-              let up = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: false)
-        else { return }
-        down.flags = flags
-        up.flags = flags
-        down.setIntegerValueField(.eventSourceUserData, value: syntheticEventMarker)
-        up.setIntegerValueField(.eventSourceUserData, value: syntheticEventMarker)
-        down.post(tap: .cghidEventTap)
-        up.post(tap: .cghidEventTap)
+        var modifiers: KeyChord.Modifiers = []
+        if flags.contains(.maskCommand) { modifiers.insert(.command) }
+        if flags.contains(.maskControl) { modifiers.insert(.control) }
+        if flags.contains(.maskAlternate) { modifiers.insert(.option) }
+        if flags.contains(.maskShift) { modifiers.insert(.shift) }
+        let label = code == 48 ? "Tab" : "Key \(code)"
+        _ = send(KeyChord(keyCode: code, keyLabel: label, modifiers: modifiers), edge: nil)
     }
 
     /// Posts a single real right-click (down + up) at the current mouse cursor
