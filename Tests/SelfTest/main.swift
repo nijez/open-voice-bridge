@@ -756,6 +756,7 @@ check(
     XiaomiRemoteVariant.detected(fromModelNumber: "ARN9") == .arn9 &&
         XiaomiRemoteVariant.detected(fromModelNumber: " arn9\n") == .arn9 &&
         XiaomiRemoteVariant.detected(fromModelNumber: "RC003") == .rc003Pro &&
+        XiaomiRemoteVariant.detected(fromModelNumber: " rc001\n") == .rc003Pro &&
         XiaomiRemoteVariant.detected(fromModelNumber: "UNKNOWN") == nil,
     "shared-name Xiaomi remotes select their variant from the Bluetooth model number"
 )

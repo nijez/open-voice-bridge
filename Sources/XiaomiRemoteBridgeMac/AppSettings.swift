@@ -35,7 +35,7 @@ enum XiaomiRemoteVariant: String, CaseIterable, Identifiable {
             .trimmingCharacters(in: .controlCharacters.union(.whitespacesAndNewlines))
             .uppercased()
         {
-        case "RC003": return .rc003Pro
+        case "RC001", "RC003": return .rc003Pro
         case "ARN9": return .arn9
         default: return nil
         }

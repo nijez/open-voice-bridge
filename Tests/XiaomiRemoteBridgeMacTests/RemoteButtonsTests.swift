@@ -143,6 +143,7 @@ struct RemoteButtonsTests {
         #expect(XiaomiRemoteVariant.detected(fromModelNumber: "ARN9") == .arn9)
         #expect(XiaomiRemoteVariant.detected(fromModelNumber: " arn9\n") == .arn9)
         #expect(XiaomiRemoteVariant.detected(fromModelNumber: "RC003") == .rc003Pro)
+        #expect(XiaomiRemoteVariant.detected(fromModelNumber: " rc001\n") == .rc003Pro)
         #expect(XiaomiRemoteVariant.detected(fromModelNumber: "UNKNOWN") == nil)
     }
 
