@@ -390,6 +390,15 @@ final class VirtualAudioOutput {
 
     private func attemptRecovery(reason: String) {
         guard !isRebuilding, !configuredDeviceUID.isEmpty else { return }
+        // A device coming or going does not necessarily break our engine — the virtual
+        // output often keeps playing through an unrelated device change. Rebuilding then
+        // would drop the voice that is in flight, so the rebuild only happens once the
+        // engine really stopped (AVAudioEngine stops it before posting the notification,
+        // and a rejected buffer already means it is gone).
+        guard engine?.isRunning != true else {
+            recoveryPolicy.reset()
+            return
+        }
         let now = Date()
         guard recoveryPolicy.attemptIsDue(now: now) else {
             scheduleRecovery(reason: reason)
