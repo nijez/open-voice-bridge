@@ -26,6 +26,7 @@ xcrun swiftc \
   "$ROOT/Sources/XiaomiRemoteBridgeMac/TestTone.swift" \
   "$ROOT/Sources/XiaomiRemoteBridgeMac/UpdatePolicy.swift" \
   "$ROOT/Sources/XiaomiRemoteBridgeMac/AudioPathDiagnostics.swift" \
+  "$ROOT/Sources/XiaomiRemoteBridgeMac/AudioOutputRecovery.swift" \
   "$ROOT/Tests/SelfTest/main.swift" \
   -o "$OUTPUT"
 OVB_DEVICE_PROFILES_DIR="$ROOT/device-profiles" "$OUTPUT"

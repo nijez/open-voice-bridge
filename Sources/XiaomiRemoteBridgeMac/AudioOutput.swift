@@ -140,6 +140,17 @@ final class VirtualAudioOutput {
     private(set) var selectedDevice: AudioDeviceInfo?
     private(set) var status = "未选择语音输出设备"
 
+    /// UID the caller asked for, kept so a dead engine can be rebuilt on the same
+    /// device after CoreAudio renumbers or drops it.
+    private var configuredDeviceUID = ""
+    private var configurationObserver: NSObjectProtocol?
+    private var deviceListListener: AudioObjectPropertyListenerBlock?
+    private var recoveryPolicy = AudioOutputRecoveryPolicy()
+    private var recoveryWork: DispatchWorkItem?
+    private var isRebuilding = false
+    private let stallLock = NSLock()
+    private var stalledReported = false
+
     init(diagnostics: AudioPathDiagnostics = AudioPathDiagnostics()) {
         self.diagnostics = diagnostics
     }
@@ -152,6 +163,7 @@ final class VirtualAudioOutput {
     @discardableResult
     func configure(deviceUID: String) -> Bool {
         stop()
+        configuredDeviceUID = deviceUID
         guard !deviceUID.isEmpty else {
             status = "未选择语音输出设备"
             return false
@@ -192,6 +204,10 @@ final class VirtualAudioOutput {
             self.player = player
             selectedDevice = device
             status = "语音输出：\(device.name)"
+            recoveryPolicy.reset()
+            clearStalledFlag()
+            observeConfigurationChanges(of: engine)
+            installDeviceListListener()
             // Log de-identified: the device name/UID is shown in the UI status
             // above but must never be written to the on-disk log.
             AppLogger.shared.write("AUDIO READY")
@@ -255,7 +271,14 @@ final class VirtualAudioOutput {
         samples: [Int16],
         diagnosticsSession: AudioPathDiagnostics.Session? = nil
     ) -> Bool {
-        guard let player, engine?.isRunning == true, let buffer = makeBuffer(samples: samples) else {
+        guard let player, engine?.isRunning == true else {
+            if let diagnosticsSession {
+                diagnostics.recordQueueRejected(for: diagnosticsSession)
+            }
+            noteOutputStalled()
+            return false
+        }
+        guard let buffer = makeBuffer(samples: samples) else {
             if let diagnosticsSession {
                 diagnostics.recordQueueRejected(for: diagnosticsSession)
             }
@@ -309,10 +332,152 @@ final class VirtualAudioOutput {
     }
 
     func stop() {
+        recoveryWork?.cancel()
+        recoveryWork = nil
+        removeConfigurationObserver()
+        removeDeviceListListener()
         player?.stop()
         engine?.stop()
         player = nil
         engine = nil
         selectedDevice = nil
+        configuredDeviceUID = ""
+        clearStalledFlag()
+    }
+
+    // MARK: - Output self-healing
+
+    /// A voice buffer could not be scheduled because the engine is gone. That is
+    /// the silent failure this app used to hide: the remote keeps streaming and
+    /// the UI keeps reporting a configured device while nothing reaches the
+    /// virtual output, so report it once per outage and start rebuilding.
+    private func noteOutputStalled() {
+        stallLock.lock()
+        let firstReport = !stalledReported
+        stalledReported = true
+        stallLock.unlock()
+        if firstReport {
+            AppLogger.shared.write("AUDIO STALLED output_running=\(engine?.isRunning == true)")
+        }
+        requestRecovery(reason: "queue_rejected")
+    }
+
+    private func clearStalledFlag() {
+        stallLock.lock()
+        stalledReported = false
+        stallLock.unlock()
+    }
+
+    private func requestRecovery(reason: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.configuredDeviceUID.isEmpty else { return }
+            self.recoveryPolicy.noteConfigurationChange(now: Date())
+            self.scheduleRecovery(reason: reason)
+        }
+    }
+
+    private func scheduleRecovery(reason: String) {
+        recoveryWork?.cancel()
+        recoveryWork = nil
+        let now = Date()
+        guard let due = recoveryPolicy.nextAttemptDate(now: now) else { return }
+        let work = DispatchWorkItem { [weak self] in
+            self?.attemptRecovery(reason: reason)
+        }
+        recoveryWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(0, due.timeIntervalSince(now)), execute: work)
+    }
+
+    private func attemptRecovery(reason: String) {
+        guard !isRebuilding, !configuredDeviceUID.isEmpty else { return }
+        let now = Date()
+        guard recoveryPolicy.attemptIsDue(now: now) else {
+            scheduleRecovery(reason: reason)
+            return
+        }
+        guard recoveryPolicy.attempts < recoveryPolicy.maxAttempts else {
+            recoveryPolicy.noteExhausted(now: now)
+            AppLogger.shared.write("AUDIO RECOVER gave_up reason=\(reason)")
+            scheduleRecovery(reason: reason)
+            return
+        }
+
+        recoveryPolicy.noteAttempt(now: now)
+        let attempt = recoveryPolicy.attempts
+        let deviceUID = configuredDeviceUID
+        isRebuilding = true
+        // configure() resets the policy on success, so the attempt number is
+        // captured before the rebuild starts.
+        let rebuilt = configure(deviceUID: deviceUID)
+        isRebuilding = false
+        if rebuilt {
+            AppLogger.shared.write("AUDIO RECOVERED attempts=\(attempt) reason=\(reason)")
+        } else {
+            AppLogger.shared.write("AUDIO RECOVER failed attempts=\(attempt) reason=\(reason)")
+            recoveryPolicy.noteConfigurationChange(now: Date())
+            scheduleRecovery(reason: reason)
+        }
+    }
+
+    /// AVAudioEngine stops itself when the hardware graph changes; the system
+    /// expects the owner to reconnect and restart it.
+    private func observeConfigurationChanges(of engine: AVAudioEngine) {
+        removeConfigurationObserver()
+        configurationObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: engine,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self, !self.isRebuilding else { return }
+            self.requestRecovery(reason: "configuration_change")
+        }
+    }
+
+    private func removeConfigurationObserver() {
+        if let configurationObserver {
+            NotificationCenter.default.removeObserver(configurationObserver)
+            self.configurationObserver = nil
+        }
+    }
+
+    /// A device list change is what renumbers the virtual output (the UID survives,
+    /// the AudioDeviceID does not), so it must also kick a rebuild.
+    private func installDeviceListListener() {
+        guard deviceListListener == nil else { return }
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.requestRecovery(reason: "device_list")
+        }
+        let status = AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            DispatchQueue.main,
+            listener
+        )
+        if status == noErr {
+            deviceListListener = listener
+        } else {
+            AppLogger.shared.write("AUDIO LISTENER failed status=\(status)")
+        }
+    }
+
+    private func removeDeviceListListener() {
+        guard let deviceListListener else { return }
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        AudioObjectRemovePropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            DispatchQueue.main,
+            deviceListListener
+        )
+        self.deviceListListener = nil
     }
 }
