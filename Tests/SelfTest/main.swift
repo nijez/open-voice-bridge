@@ -2127,6 +2127,66 @@ check(
     "DJI Mic 2 identity: rejects lookalikes and unrelated microphones"
 )
 
+// MARK: - Voice output recovery policy
+
+let recoveryClock = Date(timeIntervalSince1970: 1_000)
+var policy = AudioOutputRecoveryPolicy(debounce: 0.5, minimumInterval: 3, maxAttempts: 5, suspension: 60)
+
+check(
+    policy.nextAttemptDate(now: recoveryClock) == nil && !policy.attemptIsDue(now: recoveryClock),
+    "output recovery: nothing is scheduled until a configuration change arrives"
+)
+
+policy.noteConfigurationChange(now: recoveryClock)
+check(
+    !policy.attemptIsDue(now: recoveryClock.addingTimeInterval(0.4)),
+    "output recovery: a change does not rebuild inside the debounce window"
+)
+policy.noteConfigurationChange(now: recoveryClock.addingTimeInterval(0.3))
+check(
+    policy.attemptIsDue(now: recoveryClock.addingTimeInterval(0.5)),
+    "output recovery: a burst keeps the earliest timestamp so it cannot postpone the rebuild"
+)
+
+policy.noteAttempt(now: recoveryClock.addingTimeInterval(0.5))
+policy.noteConfigurationChange(now: recoveryClock.addingTimeInterval(0.6))
+check(
+    policy.attempts == 1 &&
+        !policy.attemptIsDue(now: recoveryClock.addingTimeInterval(1.0)) &&
+        policy.nextAttemptDate(now: recoveryClock.addingTimeInterval(1.0))
+            == recoveryClock.addingTimeInterval(3.5),
+    "output recovery: attempts are spaced by the minimum interval even when changes keep arriving"
+)
+
+// Five failed attempts, then the policy stays quiet instead of looping.
+var exhausted = AudioOutputRecoveryPolicy(debounce: 0.5, minimumInterval: 3, maxAttempts: 5, suspension: 60)
+for index in 0..<4 {
+    exhausted.noteConfigurationChange(now: recoveryClock.addingTimeInterval(Double(index) * 3))
+    exhausted.noteAttempt(now: recoveryClock.addingTimeInterval(Double(index) * 3 + 0.5))
+}
+let exhaustTime = recoveryClock.addingTimeInterval(100)
+exhausted.noteConfigurationChange(now: exhaustTime)
+exhausted.noteExhausted(now: exhaustTime)
+exhausted.noteConfigurationChange(now: exhaustTime.addingTimeInterval(1))
+check(
+    exhausted.attempts == 0 &&
+        !exhausted.attemptIsDue(now: exhaustTime.addingTimeInterval(30)) &&
+        exhausted.nextAttemptDate(now: exhaustTime.addingTimeInterval(30))
+            == exhaustTime.addingTimeInterval(60),
+    "output recovery: exhausting the attempts suspends retries instead of rebuilding in a loop"
+)
+check(
+    exhausted.attemptIsDue(now: exhaustTime.addingTimeInterval(60)),
+    "output recovery: a suspended policy tries again once the backoff expires"
+)
+
+policy.reset()
+check(
+    !policy.attemptIsDue(now: recoveryClock.addingTimeInterval(60)) &&
+        policy.attempts == 0 && policy.nextAttemptDate(now: recoveryClock) == nil,
+    "output recovery: a healthy engine forgets the burst and the attempt count"
+)
+
 print("RESULT passed=\(passed) failed=\(failed)")
 if failed > 0 {
     exit(1)

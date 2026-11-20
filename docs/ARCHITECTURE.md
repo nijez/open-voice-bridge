@@ -73,7 +73,8 @@ Xiaomi RC003 当前由 `XiaomiBluetoothBridge`、`HIDRemoteMonitor` 和 `RemoteV
 - 不自动修改系统默认输入/输出；
 - 不上传或保存语音；
 - 测试音不能阻塞真实语音；
-- 新一代连接不能接受旧一代回调或音频帧。
+- 新一代连接不能接受旧一代回调或音频帧；
+- 音频图变化后必须自愈：输出引擎失效时按同一目标设备重建并在日志留下 `AUDIO STALLED` / `AUDIO RECOVERED` 一类的可诊断记录，不得静默丢弃语音帧。
 
 ### 5. Action mapping
 
