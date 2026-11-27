@@ -65,6 +65,7 @@ final class FunctionKeyMonitor {
             eventTap,
             0
         ) else {
+            CFMachPortInvalidate(eventTap)
             return false
         }
 
@@ -83,6 +84,7 @@ final class FunctionKeyMonitor {
         }
         if let eventTap {
             CGEvent.tapEnable(tap: eventTap, enable: false)
+            CFMachPortInvalidate(eventTap)
         }
         runLoopSource = nil
         eventTap = nil
