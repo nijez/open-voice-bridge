@@ -56,6 +56,7 @@ final class KeyboardEventSuppressor {
             eventTap,
             0
         ) else {
+            CFMachPortInvalidate(eventTap)
             return false
         }
 
@@ -76,6 +77,7 @@ final class KeyboardEventSuppressor {
         }
         if let eventTap {
             CGEvent.tapEnable(tap: eventTap, enable: false)
+            CFMachPortInvalidate(eventTap)
         }
         runLoopSource = nil
         eventTap = nil
